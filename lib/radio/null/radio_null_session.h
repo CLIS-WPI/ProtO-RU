@@ -7,18 +7,25 @@
 #include "ocudu/radio/radio_session.h"
 #include "ocudu/support/executors/task_executor.h"
 #include <atomic>
+#include <chrono>
+#include <condition_variable>
+#include <cstdint>
 #include <fstream>
 #include <memory>
 #include <mutex>
 #include <string>
+#include <thread>
 #include <vector>
 
 namespace ocudu {
 
-/// Null radio: dumps TX IQ to .cf32 files; RX from file or zeros. No RF hardware.
+/// Null radio: dumps TX IQ to .cf32; RX from file or zeros. No RF hardware.
+/// Clock advances only in receive(). Default pace=realtime (system_clock).
 class radio_session_null_impl : public radio_session, public radio_management_plane
 {
 public:
+  enum class pace_mode { realtime, free };
+
   radio_session_null_impl(const radio_configuration::radio& config,
                           task_executor&                    async_task_executor,
                           radio_event_notifier&             notification_handler);
@@ -26,11 +33,11 @@ public:
 
   bool is_successful() const { return successful; }
 
-  radio_management_plane& get_management_plane() override { return *this; }
-  baseband_gateway&       get_baseband_gateway(unsigned stream_id) override;
-  baseband_gateway_timestamp read_current_time() override;
-  void                       start(baseband_gateway_timestamp init_time) override;
-  void                       stop() override;
+  radio_management_plane&        get_management_plane() override { return *this; }
+  baseband_gateway&              get_baseband_gateway(unsigned stream_id) override;
+  baseband_gateway_timestamp     read_current_time() override;
+  void                           start(baseband_gateway_timestamp init_time) override;
+  void                           stop() override;
 
   bool set_tx_gain(unsigned /*port_id*/, double /*gain_dB*/) override { return true; }
   bool set_rx_gain(unsigned /*port_id*/, double /*gain_dB*/) override { return true; }
@@ -39,22 +46,55 @@ public:
 
 private:
   class null_gateway;
+  struct tx_block {
+    baseband_gateway_timestamp ts{0};
+    unsigned                   nof_samples{0};
+    unsigned                   nof_channels{0};
+    bool                       is_empty{false};
+    std::vector<float>         interleaved; // ch-major: ch0 all samples, then ch1...
+  };
 
   ocudulog::basic_logger& logger;
   bool                    successful = false;
   std::string             tx_dump_dir;
   std::string             rx_feed_dir;
+  pace_mode               pace = pace_mode::realtime;
   double                  sampling_rate_Hz = 0.0;
   unsigned                nof_tx_ports     = 0;
   unsigned                nof_rx_ports     = 0;
-  std::atomic<baseband_gateway_timestamp> current_time{0};
-  std::vector<std::unique_ptr<null_gateway>> gateways;
-  std::mutex                                 dump_mutex;
-  bool                                       started = false;
-  baseband_gateway_timestamp                 start_ts{0};
+  unsigned                scs_khz          = 30;
+  unsigned                samples_per_slot = 0;
 
-  static bool parse_args(const std::string& args, std::string& tx_dump, std::string& rx_feed);
-  void         write_sidecar_json() const;
+  std::atomic<baseband_gateway_timestamp> current_time{0};
+  baseband_gateway_timestamp              start_ts{0};
+  std::chrono::system_clock::time_point   wall_start{};
+  bool                                    started = false;
+
+  std::vector<std::unique_ptr<null_gateway>> gateways;
+
+  // Async TX dump writer (no blocking I/O on transmit path).
+  static constexpr size_t TX_RING_CAP = 64;
+  std::vector<tx_block>   tx_ring;
+  std::mutex              tx_mu;
+  std::condition_variable tx_cv;
+  size_t                  tx_head{0};
+  size_t                  tx_tail{0};
+  size_t                  tx_count{0};
+  bool                    tx_stop{false};
+  std::thread             tx_writer;
+  std::ofstream           tx_index; // (ts, nof_samples, is_empty, sfn, slot) per buffer
+  baseband_gateway_timestamp tx_file_cursor{0};
+
+  void enqueue_tx(tx_block&& blk);
+  void writer_loop();
+  void write_sidecar_json() const;
+  void slot_of(baseband_gateway_timestamp ts, unsigned& sfn, unsigned& slot) const;
+
+  static bool parse_args(const std::string& args,
+                         std::string&       tx_dump,
+                         std::string&       rx_feed,
+                         pace_mode&         pace,
+                         unsigned&          scs_khz);
 };
 
 } // namespace ocudu
