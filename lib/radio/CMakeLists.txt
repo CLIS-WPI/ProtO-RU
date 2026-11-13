@@ -23,6 +23,11 @@ if (ZEROMQ_FOUND AND ENABLE_ZEROMQ)
     list(APPEND OCUDU_RADIO_LIBRARIES ocudu_radio_zmq)
 endif (ZEROMQ_FOUND AND ENABLE_ZEROMQ)
 
+# OpenRU null radio backend (IQ dump / zero feed). Always built for Phase 1.
+add_subdirectory(null)
+list(APPEND OCUDU_RADIO_DEFINITIONS -DENABLE_NULL_RADIO)
+list(APPEND OCUDU_RADIO_LIBRARIES ocudu_radio_null)
+
 add_definitions(${OCUDU_RADIO_DEFINITIONS})
 target_link_libraries(ocudu_radio ${OCUDU_RADIO_LIBRARIES} ocudulog dl)
 

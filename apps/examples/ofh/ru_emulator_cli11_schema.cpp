@@ -96,7 +96,8 @@ static void configure_cli11_sdr_args(CLI::App& app, std::optional<ru_emulator_sd
   sdr_config.emplace();
   ru_emulator_sdr_appconfig& cfg = *sdr_config;
 
-  app.add_option("--device_driver", cfg.device_driver, "Radio device driver (uhd or zmq)")->capture_default_str();
+  app.add_option("--device_driver", cfg.device_driver, "Radio device driver (uhd, zmq, or null)")
+      ->capture_default_str();
   app.add_option("--device_args", cfg.device_arguments, "Radio device arguments")->capture_default_str();
   app.add_option("--srate", cfg.srate_MHz, "Sampling rate in MHz")->capture_default_str();
   app.add_option("--dl_freq_override",

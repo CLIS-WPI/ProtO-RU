@@ -149,9 +149,9 @@ ru_sdr_configuration ocudu::generate_ru_emulator_sdr_config(const ru_emulator_sd
   low.system_time_throttling     = 0.0F;
   // One extra slot for sample collection and one for processing delay.
   low.max_nof_prach_concurrent_requests = sdr_cfg.max_proc_delay + 2;
-  low.baseband_rx_buffer_size_policy    = (sdr_cfg.device_driver == "zmq")
-                                              ? lower_phy_baseband_buffer_size_policy::slot
-                                              : lower_phy_baseband_buffer_size_policy::single_packet;
+  const bool soft_radio = (sdr_cfg.device_driver == "zmq" || sdr_cfg.device_driver == "null");
+  low.baseband_rx_buffer_size_policy =
+      soft_radio ? lower_phy_baseband_buffer_size_policy::slot : lower_phy_baseband_buffer_size_policy::single_packet;
 
   // Gain back-off accounting for the PAPR of the signal and the DFT power normalisation.
   low.amplitude_config.input_gain_dB   = -10.0F * std::log10(bandwidth_sc) - sdr_cfg.gain_backoff_dB;
@@ -167,7 +167,8 @@ ru_sdr_configuration ocudu::generate_ru_emulator_sdr_config(const ru_emulator_sd
   // Anchor SFN0 to a PPS edge on real radios by starting at a near-future whole-second boundary (the SDR controller
   // reads the radio clock at that instant and aligns sfn0_ref_time to the next radio PPS). ZMQ has no clock
   // (read_current_time() == 0, which would make the controller's time_start underflow), so it stays free-running.
-  if (sdr_cfg.device_driver != "zmq") {
+  // ZMQ/null have no hardware PPS clock; stay free-running like ZMQ.
+  if (sdr_cfg.device_driver != "zmq" && sdr_cfg.device_driver != "null") {
     out.start_time =
         std::chrono::floor<std::chrono::seconds>(std::chrono::system_clock::now() + std::chrono::seconds(2));
   }
