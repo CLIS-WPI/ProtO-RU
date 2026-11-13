@@ -3,6 +3,7 @@
 // Derived from ProtO-RU/OCUDU radio interfaces (AGPLv3).
 
 #include "radio_null_session.h"
+#include "ocudu/ocudulog/ocudulog.h"
 #include "ocudu/adt/complex.h"
 #include "ocudu/gateways/baseband/baseband_gateway.h"
 #include "ocudu/gateways/baseband/baseband_gateway_receiver.h"
