@@ -363,7 +363,7 @@ void radio_session_null_impl::writer_loop()
       dump_started             = true;
       first_du_sfn             = static_cast<int>(du_sfn);
       first_du_slot            = static_cast<int>(du_slot);
-      first_dump_sample_offset = static_cast<uint64_t>(blk.ts - start_ts);
+      first_dump_sample_offset = 0; // file starts at the first dumped block
       logger.info("null radio: dump start at SFN 0.0 after {} stable slots (delta={})",
                   delta_stable_count,
                   stable_delta);
@@ -375,7 +375,15 @@ void radio_session_null_impl::writer_loop()
       continue;
     }
 
-    // Gap-fill so file sample offset == (ts - start_ts).
+    if (dump_slots_written.load() == 0) {
+      // Start the file at the first dumped block. Do not write the cold-start
+      // settle gap; tx_index offsets stay relative to this first block.
+      dump_first_ts                = blk.ts;
+      first_dump_abs_sample_offset = static_cast<uint64_t>(blk.ts - start_ts);
+      tx_file_cursor               = blk.ts;
+    }
+
+    // Gap-fill so file sample offset == (ts - dump_first_ts).
     if (blk.ts > tx_file_cursor) {
       const uint64_t gap = static_cast<uint64_t>(blk.ts - tx_file_cursor);
       const uint64_t gap_bytes_per_port = gap * 2 * sizeof(float);
@@ -414,7 +422,7 @@ void radio_session_null_impl::writer_loop()
                << ",\"is_empty\":" << (blk.is_empty ? "true" : "false") << ",\"du_sfn\":" << du_sfn
                << ",\"du_slot\":" << du_slot << ",\"radio_sfn\":" << radio_sfn
                << ",\"radio_slot\":" << radio_slot
-               << ",\"symbol0_sample_offset\":" << (blk.ts - start_ts) << "}\n";
+               << ",\"symbol0_sample_offset\":" << (blk.ts - dump_first_ts) << "}\n";
       if (!tx_index) {
         fail_dump("tx_index write failed", du_sfn, du_slot);
         continue;
@@ -597,6 +605,7 @@ void radio_session_null_impl::write_sidecar_json() const
       << "    \"first_du_sfn\": " << first_du_sfn << ",\n"
       << "    \"first_du_slot\": " << first_du_slot << ",\n"
       << "    \"first_dump_sample_offset\": " << first_dump_sample_offset << ",\n"
+      << "    \"first_dump_abs_sample_offset\": " << first_dump_abs_sample_offset << ",\n"
       << "    \"last_du_sfn\": " << last_du_sfn << ",\n"
       << "    \"last_du_slot\": " << last_du_slot << "\n"
       << "  },\n"

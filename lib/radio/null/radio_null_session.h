@@ -91,6 +91,7 @@ private:
   std::thread             tx_writer;
   std::ofstream           tx_index; // per buffer; slots in DU/OTA (GPS/OFH) numbering
   baseband_gateway_timestamp tx_file_cursor{0};
+  baseband_gateway_timestamp dump_first_ts{0}; // first written block timestamp
 
   // Dump accounting (writer thread).
   std::atomic<bool>     dump_cap_reached{false};
@@ -101,7 +102,8 @@ private:
   int                   last_du_slot{-1};
   int                   first_du_sfn{-1};
   int                   first_du_slot{-1};
-  uint64_t              first_dump_sample_offset{0};
+  uint64_t              first_dump_sample_offset{0}; // file-relative (always 0)
+  uint64_t              first_dump_abs_sample_offset{0}; // ts - start_ts at first write
   bool                  dump_started{false};
   int                   stable_delta{0};
   bool                  have_stable_delta{false};
