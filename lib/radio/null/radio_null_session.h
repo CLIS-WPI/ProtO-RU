@@ -64,6 +64,10 @@ private:
   unsigned                nof_rx_ports     = 0;
   unsigned                scs_khz          = 30;
   unsigned                samples_per_slot = 0;
+  /// 0 = unlimited (still fails closed if the dump filesystem fills).
+  uint64_t                max_dump_bytes = 0;
+  /// 0 = unlimited. Caps how many slots are written to .cf32 / tx_index.
+  uint64_t                max_dump_slots = 0;
 
   std::atomic<baseband_gateway_timestamp> current_time{0};
   baseband_gateway_timestamp              start_ts{0};
@@ -82,19 +86,33 @@ private:
   size_t                  tx_count{0};
   bool                    tx_stop{false};
   std::thread             tx_writer;
-  std::ofstream           tx_index; // (ts, nof_samples, is_empty, sfn, slot) per buffer
+  std::ofstream           tx_index; // per buffer; slots in DU/OTA (GPS/OFH) numbering
   baseband_gateway_timestamp tx_file_cursor{0};
+
+  // Dump accounting (writer thread).
+  std::atomic<bool>     dump_cap_reached{false};
+  std::atomic<uint64_t> dump_bytes_written{0};
+  std::atomic<uint64_t> dump_slots_written{0};
+  std::atomic<uint64_t> dump_dropped_buffers{0};
+  int                   last_du_sfn{-1};
+  int                   last_du_slot{-1};
+  std::string           dump_stop_reason;
 
   void enqueue_tx(tx_block&& blk);
   void writer_loop();
   void write_sidecar_json() const;
-  void slot_of(baseband_gateway_timestamp ts, unsigned& sfn, unsigned& slot) const;
+  /// Radio-local slot (free-running from start_ts); debug only.
+  void slot_of_radio(baseband_gateway_timestamp ts, unsigned& sfn, unsigned& slot) const;
+  /// DU/OTA (= GPS/OFH wire, SFN mod 256) slot for air time of sample ts.
+  void slot_of_du(baseband_gateway_timestamp ts, unsigned& sfn, unsigned& slot) const;
 
   static bool parse_args(const std::string& args,
                          std::string&       tx_dump,
                          std::string&       rx_feed,
                          pace_mode&         pace,
-                         unsigned&          scs_khz);
+                         unsigned&          scs_khz,
+                         uint64_t&          max_dump_bytes,
+                         uint64_t&          max_dump_slots);
 };
 
 } // namespace ocudu

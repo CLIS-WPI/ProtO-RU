@@ -35,6 +35,9 @@ std::string extract_kv(const std::string& args, const std::string& key)
   return args.substr(pos, end == std::string::npos ? std::string::npos : end - pos);
 }
 
+/// Same epoch conversion as apps/examples/ofh/ru_emulator_gps_slot_alignment.h (paper §3.1).
+constexpr uint64_t UNIX_TO_GPS_SECONDS_OFFSET = 315964800ULL - 18ULL;
+
 } // namespace
 
 class radio_session_null_impl::null_gateway : public baseband_gateway,
@@ -73,23 +76,23 @@ public:
     const unsigned nc = std::min(data.get_nof_channels(), nof_tx);
 
     tx_block blk;
-    blk.ts          = md.ts;
-    blk.nof_samples = ns;
+    blk.ts           = md.ts;
+    blk.nof_samples  = ns;
     blk.nof_channels = nc;
-    blk.is_empty    = md.is_empty;
+    blk.is_empty     = md.is_empty;
     blk.interleaved.resize(static_cast<size_t>(nc) * ns * 2);
 
     if (!md.is_empty) {
       for (unsigned ch = 0; ch < nc; ++ch) {
-        span<const ci16_t> buf = data.get_channel_buffer(ch);
-        float*             dst = blk.interleaved.data() + static_cast<size_t>(ch) * ns * 2;
+        span<const ci16_t> buf   = data.get_channel_buffer(ch);
+        float*             dst   = blk.interleaved.data() + static_cast<size_t>(ch) * ns * 2;
         const unsigned     start = md.tx_start.value_or(0);
         const unsigned     end   = md.tx_end.value_or(ns);
         for (unsigned i = 0; i < ns; ++i) {
           if (i < start || i >= end) {
             dst[2 * i] = dst[2 * i + 1] = 0.0f;
           } else {
-            const cf_t s        = to_cf(buf[i]);
+            const cf_t s   = to_cf(buf[i]);
             dst[2 * i]     = s.real();
             dst[2 * i + 1] = s.imag();
           }
@@ -107,8 +110,8 @@ public:
     const unsigned                   ns = data.get_nof_samples();
     const baseband_gateway_timestamp ts = parent.current_time.load(std::memory_order_relaxed);
 
-    // Realtime pacing: block until wall clock reaches end of this buffer.
-    // Uses system_clock — same clock ProtO-RU uses for SDR start_time alignment.
+    // Absolute-deadline pacing: sleep until wall_start + (ts-start_ts+ns)/srate.
+    // Relative sleeps accumulate error; this bound tracks wall clock.
     if (parent.pace == pace_mode::realtime && parent.sampling_rate_Hz > 0.0) {
       const double end_secs =
           static_cast<double>((ts - parent.start_ts) + ns) / parent.sampling_rate_Hz;
@@ -147,10 +150,9 @@ public:
     md.ts = ts;
     parent.current_time.fetch_add(ns, std::memory_order_relaxed);
 
-    // Optional pace verification log: wall_unix_s,radio_ts (one line per receive).
     static thread_local unsigned pace_decim = 0;
     if (parent.pace == pace_mode::realtime && (++pace_decim % 2000) == 0) {
-      const auto now = std::chrono::system_clock::now().time_since_epoch();
+      const auto   now = std::chrono::system_clock::now().time_since_epoch();
       const double wall_s =
           std::chrono::duration_cast<std::chrono::duration<double>>(now).count();
       parent.logger.info("null_pace wall_s={:.6f} radio_ts={}", wall_s, md.ts + ns);
@@ -170,7 +172,9 @@ bool radio_session_null_impl::parse_args(const std::string& args,
                                          std::string&       tx_dump,
                                          std::string&       rx_feed,
                                          pace_mode&         pace,
-                                         unsigned&          scs_khz)
+                                         unsigned&          scs_khz,
+                                         uint64_t&          max_dump_bytes,
+                                         uint64_t&          max_dump_slots)
 {
   tx_dump = extract_kv(args, "tx_dump");
   if (tx_dump.empty()) {
@@ -184,29 +188,71 @@ bool radio_session_null_impl::parse_args(const std::string& args,
   if (pace_s == "free") {
     pace = pace_mode::free;
   } else {
-    pace = pace_mode::realtime; // default
+    pace = pace_mode::realtime;
   }
   const std::string scs_s = extract_kv(args, "scs_khz");
   if (!scs_s.empty()) {
     scs_khz = static_cast<unsigned>(std::stoul(scs_s));
   }
+  const std::string mdb = extract_kv(args, "max_dump_bytes");
+  if (!mdb.empty()) {
+    max_dump_bytes = std::stoull(mdb);
+  }
+  const std::string mds = extract_kv(args, "max_dump_slots");
+  if (!mds.empty()) {
+    max_dump_slots = std::stoull(mds);
+  }
   return !tx_dump.empty() || !rx_feed.empty() || args.empty() || !pace_s.empty();
 }
 
-void radio_session_null_impl::slot_of(baseband_gateway_timestamp ts, unsigned& sfn, unsigned& slot) const
+void radio_session_null_impl::slot_of_radio(baseband_gateway_timestamp ts, unsigned& sfn, unsigned& slot) const
 {
-  const unsigned slots_per_frame = 10u * (scs_khz / 15u); // 20 for 30 kHz
+  const unsigned slots_per_frame = 10u * (scs_khz / 15u);
   const uint64_t abs_slot =
       samples_per_slot > 0 ? static_cast<uint64_t>((ts - start_ts) / samples_per_slot) : 0;
   sfn  = static_cast<unsigned>((abs_slot / slots_per_frame) % 1024u);
   slot = static_cast<unsigned>(abs_slot % slots_per_frame);
 }
 
+void radio_session_null_impl::slot_of_du(baseband_gateway_timestamp ts, unsigned& sfn, unsigned& slot) const
+{
+  // DU/OTA numbering = GPS timescale, OFH SFN mod 256 (same as gps_slot_alignment).
+  const unsigned slots_per_subframe = scs_khz / 15u;
+  const unsigned slots_per_frame    = 10u * slots_per_subframe;
+  const unsigned ofh_period         = 256u * slots_per_frame;
+  if (sampling_rate_Hz <= 0.0 || slots_per_frame == 0) {
+    sfn = slot = 0;
+    return;
+  }
+  const double elapsed =
+      static_cast<double>(ts > start_ts ? (ts - start_ts) : 0) / sampling_rate_Hz;
+  const auto air = wall_start + std::chrono::duration_cast<std::chrono::system_clock::duration>(
+                                    std::chrono::duration<double>(elapsed));
+  const uint64_t unix_ns =
+      static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(air.time_since_epoch()).count());
+  const uint64_t slot_ns  = 1000000000ULL / (1000ULL * slots_per_subframe);
+  const uint64_t gps_ns   = unix_ns - UNIX_TO_GPS_SECONDS_OFFSET * 1000000000ULL;
+  const uint64_t gps_slot = (gps_ns + slot_ns / 2) / slot_ns;
+  const unsigned wire     = static_cast<unsigned>(gps_slot % ofh_period);
+  sfn                     = wire / slots_per_frame;
+  slot                    = wire % slots_per_frame;
+}
+
 void radio_session_null_impl::enqueue_tx(tx_block&& blk)
 {
+  // After dump cap, do not block the TX path — count and drop.
+  if (dump_cap_reached.load(std::memory_order_relaxed) || tx_dump_dir.empty()) {
+    if (!tx_dump_dir.empty()) {
+      dump_dropped_buffers.fetch_add(1, std::memory_order_relaxed);
+    }
+    return;
+  }
   std::unique_lock<std::mutex> lock(tx_mu);
-  tx_cv.wait(lock, [this] { return tx_count < TX_RING_CAP || tx_stop; });
-  if (tx_stop) {
+  tx_cv.wait(lock, [this] { return tx_count < TX_RING_CAP || tx_stop || dump_cap_reached.load(); });
+  if (tx_stop || dump_cap_reached.load()) {
+    if (!tx_stop) {
+      dump_dropped_buffers.fetch_add(1, std::memory_order_relaxed);
+    }
     return;
   }
   tx_ring[tx_tail] = std::move(blk);
@@ -230,10 +276,27 @@ void radio_session_null_impl::writer_loop()
     tx_index.open(fs::path(tx_dump_dir) / "tx_index.jsonl", std::ios::trunc);
   }
 
-  // Lower writer priority (best-effort).
   sched_param sp{};
   sp.sched_priority = 0;
   pthread_setschedparam(pthread_self(), SCHED_OTHER, &sp);
+
+  auto fail_dump = [&](const std::string& reason, unsigned du_sfn, unsigned du_slot) {
+    if (dump_cap_reached.exchange(true)) {
+      return;
+    }
+    dump_stop_reason = reason;
+    last_du_sfn      = static_cast<int>(du_sfn);
+    last_du_slot     = static_cast<int>(du_slot);
+    logger.warning("null radio: dump stop — {} at DU slot {}.{} (bytes={} slots={} dropped={})",
+                   reason,
+                   du_sfn,
+                   du_slot,
+                   dump_bytes_written.load(),
+                   dump_slots_written.load(),
+                   dump_dropped_buffers.load());
+    write_sidecar_json();
+    tx_cv.notify_all();
+  };
 
   while (true) {
     tx_block blk;
@@ -243,37 +306,77 @@ void radio_session_null_impl::writer_loop()
       if (tx_count == 0 && tx_stop) {
         break;
       }
+      if (tx_count == 0) {
+        continue;
+      }
       blk     = std::move(tx_ring[tx_head]);
       tx_head = (tx_head + 1) % TX_RING_CAP;
       --tx_count;
     }
     tx_cv.notify_one();
 
-    if (ports.empty()) {
+    if (ports.empty() || dump_cap_reached.load()) {
+      dump_dropped_buffers.fetch_add(1, std::memory_order_relaxed);
+      continue;
+    }
+
+    unsigned du_sfn = 0, du_slot = 0, radio_sfn = 0, radio_slot = 0;
+    slot_of_du(blk.ts, du_sfn, du_slot);
+    slot_of_radio(blk.ts, radio_sfn, radio_slot);
+
+    if (max_dump_slots > 0 && dump_slots_written.load() >= max_dump_slots) {
+      fail_dump("max_dump_slots reached", du_sfn, du_slot);
+      dump_dropped_buffers.fetch_add(1, std::memory_order_relaxed);
       continue;
     }
 
     // Gap-fill so file sample offset == (ts - start_ts).
     if (blk.ts > tx_file_cursor) {
       const uint64_t gap = static_cast<uint64_t>(blk.ts - tx_file_cursor);
+      const uint64_t gap_bytes_per_port = gap * 2 * sizeof(float);
+      if (max_dump_bytes > 0 &&
+          dump_bytes_written.load() + gap_bytes_per_port * nof_tx_ports > max_dump_bytes) {
+        fail_dump("max_dump_bytes reached during gap-fill", du_sfn, du_slot);
+        continue;
+      }
       std::vector<float> zeros(static_cast<size_t>(gap) * 2, 0.0f);
       for (unsigned p = 0; p < nof_tx_ports; ++p) {
         if (ports[p].is_open()) {
           ports[p].write(reinterpret_cast<const char*>(zeros.data()),
                          static_cast<std::streamsize>(zeros.size() * sizeof(float)));
+          if (!ports[p]) {
+            fail_dump("write failed (filesystem full? check /dev/shm size)", du_sfn, du_slot);
+            break;
+          }
         }
       }
+      if (dump_cap_reached.load()) {
+        continue;
+      }
+      dump_bytes_written.fetch_add(gap_bytes_per_port * nof_tx_ports, std::memory_order_relaxed);
       tx_file_cursor = blk.ts;
     }
 
-    unsigned sfn = 0, slot = 0;
-    slot_of(blk.ts, sfn, slot);
-    if (tx_index.is_open()) {
-      tx_index << "{\"ts\":" << blk.ts << ",\"nof_samples\":" << blk.nof_samples
-               << ",\"is_empty\":" << (blk.is_empty ? "true" : "false") << ",\"sfn\":" << sfn
-               << ",\"slot\":" << slot << ",\"symbol0_sample_offset\":" << (blk.ts - start_ts) << "}\n";
+    const uint64_t payload_bytes_per_port = static_cast<uint64_t>(blk.nof_samples) * 2 * sizeof(float);
+    if (max_dump_bytes > 0 &&
+        dump_bytes_written.load() + payload_bytes_per_port * nof_tx_ports > max_dump_bytes) {
+      fail_dump("max_dump_bytes reached", du_sfn, du_slot);
+      continue;
     }
 
+    if (tx_index.is_open()) {
+      tx_index << "{\"ts\":" << blk.ts << ",\"nof_samples\":" << blk.nof_samples
+               << ",\"is_empty\":" << (blk.is_empty ? "true" : "false") << ",\"du_sfn\":" << du_sfn
+               << ",\"du_slot\":" << du_slot << ",\"radio_sfn\":" << radio_sfn
+               << ",\"radio_slot\":" << radio_slot
+               << ",\"symbol0_sample_offset\":" << (blk.ts - start_ts) << "}\n";
+      if (!tx_index) {
+        fail_dump("tx_index write failed", du_sfn, du_slot);
+        continue;
+      }
+    }
+
+    bool write_ok = true;
     if (!blk.is_empty && !blk.interleaved.empty()) {
       for (unsigned ch = 0; ch < blk.nof_channels && ch < nof_tx_ports; ++ch) {
         if (!ports[ch].is_open()) {
@@ -282,6 +385,10 @@ void radio_session_null_impl::writer_loop()
         const float* src = blk.interleaved.data() + static_cast<size_t>(ch) * blk.nof_samples * 2;
         ports[ch].write(reinterpret_cast<const char*>(src),
                         static_cast<std::streamsize>(blk.nof_samples * 2 * sizeof(float)));
+        if (!ports[ch]) {
+          write_ok = false;
+          break;
+        }
       }
     } else if (blk.is_empty) {
       std::vector<float> zeros(static_cast<size_t>(blk.nof_samples) * 2, 0.0f);
@@ -289,10 +396,27 @@ void radio_session_null_impl::writer_loop()
         if (ports[p].is_open()) {
           ports[p].write(reinterpret_cast<const char*>(zeros.data()),
                          static_cast<std::streamsize>(zeros.size() * sizeof(float)));
+          if (!ports[p]) {
+            write_ok = false;
+            break;
+          }
         }
       }
     }
+    if (!write_ok) {
+      fail_dump("write failed (filesystem full? check /dev/shm size)", du_sfn, du_slot);
+      continue;
+    }
+
+    dump_bytes_written.fetch_add(payload_bytes_per_port * nof_tx_ports, std::memory_order_relaxed);
+    dump_slots_written.fetch_add(1, std::memory_order_relaxed);
+    last_du_sfn  = static_cast<int>(du_sfn);
+    last_du_slot = static_cast<int>(du_slot);
     tx_file_cursor = blk.ts + blk.nof_samples;
+
+    if (max_dump_slots > 0 && dump_slots_written.load() >= max_dump_slots) {
+      fail_dump("max_dump_slots reached", du_sfn, du_slot);
+    }
   }
 }
 
@@ -302,7 +426,7 @@ radio_session_null_impl::radio_session_null_impl(const radio_configuration::radi
   logger(ocudulog::fetch_basic_logger("RADIO", false)), tx_ring(TX_RING_CAP)
 {
   sampling_rate_Hz = config.sampling_rate_Hz;
-  if (!parse_args(config.args, tx_dump_dir, rx_feed_dir, pace, scs_khz)) {
+  if (!parse_args(config.args, tx_dump_dir, rx_feed_dir, pace, scs_khz, max_dump_bytes, max_dump_slots)) {
     logger.error("null radio: failed to parse args '{}'", config.args);
     return;
   }
@@ -316,7 +440,6 @@ radio_session_null_impl::radio_session_null_impl(const radio_configuration::radi
                          ? static_cast<unsigned>(std::llround(sampling_rate_Hz / (1000.0 * (scs_khz / 15.0))))
                          : 0;
 
-  // Prefer tmpfs for dump during runs if caller passed a /tmp path; document /dev/shm in profiles.
   gateways.push_back(std::make_unique<null_gateway>(*this, nof_tx_ports, nof_rx_ports));
   gateways.front()->open_rx(rx_feed_dir);
 
@@ -327,7 +450,7 @@ radio_session_null_impl::radio_session_null_impl(const radio_configuration::radi
   successful = true;
   logger.info(
       "null radio ready: tx_dump='{}' rx_feed='{}' pace={} tx_ports={} rx_ports={} srate={:.2f}Hz "
-      "samples_per_slot={}{}",
+      "samples_per_slot={} max_dump_slots={} max_dump_bytes={}{}",
       tx_dump_dir,
       rx_feed_dir,
       pace == pace_mode::realtime ? "realtime" : "free",
@@ -335,6 +458,8 @@ radio_session_null_impl::radio_session_null_impl(const radio_configuration::radi
       nof_rx_ports,
       sampling_rate_Hz,
       samples_per_slot,
+      max_dump_slots,
+      max_dump_bytes,
       pace == pace_mode::free ? " [OFFLINE THROUGHPUT — not a timing claim]" : "");
 }
 
@@ -394,13 +519,27 @@ void radio_session_null_impl::write_sidecar_json() const
       << "  \"format\": \"cf32\",\n"
       << "  \"backend\": \"null\",\n"
       << "  \"pace\": \"" << (pace == pace_mode::realtime ? "realtime" : "free") << "\",\n"
+      << "  \"slot_numbering\": \"du_ota_gps_ofh\",\n"
+      << "  \"slot_numbering_note\": \"du_sfn/du_slot are GPS/OFH wire slots (SFN mod 256), matching the DU OTA grid; radio_* are free-running from start_timestamp\",\n"
       << "  \"slot_grid\": {\n"
       << "    \"scs_kHz\": " << scs_khz << ",\n"
       << "    \"samples_per_slot\": " << samples_per_slot << ",\n"
       << "    \"slots_per_frame\": " << (10u * (scs_khz / 15u)) << ",\n"
+      << "    \"ofh_sfn_mod\": 256,\n"
       << "    \"symbol0_sample_offset_basis\": \"ts - start_timestamp\"\n"
       << "  },\n"
+      << "  \"dump\": {\n"
+      << "    \"max_dump_slots\": " << max_dump_slots << ",\n"
+      << "    \"max_dump_bytes\": " << max_dump_bytes << ",\n"
+      << "    \"slots_written\": " << dump_slots_written.load() << ",\n"
+      << "    \"bytes_written\": " << dump_bytes_written.load() << ",\n"
+      << "    \"dropped_buffers\": " << dump_dropped_buffers.load() << ",\n"
+      << "    \"cap_reached\": " << (dump_cap_reached.load() ? "true" : "false") << ",\n"
+      << "    \"stop_reason\": \"" << dump_stop_reason << "\",\n"
+      << "    \"last_du_sfn\": " << last_du_sfn << ",\n"
+      << "    \"last_du_slot\": " << last_du_slot << "\n"
+      << "  },\n"
       << "  \"tx_index\": \"tx_index.jsonl\",\n"
-      << "  \"align\": \"slot\"\n"
+      << "  \"align\": \"du_slot\"\n"
       << "}\n";
 }
