@@ -12,6 +12,7 @@
 #include "ocudu/ran/resource_block.h"
 #include "ocudu/ru/ru_downlink_plane.h"
 #include "ocudu/support/error_handling.h"
+#include "ocudu/support/openru_trace.h"
 #include <vector>
 
 using namespace ocudu;
@@ -75,6 +76,7 @@ void ru_emulator_sdr_upper_phy::on_downlink_rx_grid_completed(slot_point slot, c
   context.slot   = slot_point(slot.numerology(), radio_slot_count);
   context.sector = sector_id;
   handler->handle_dl_data(context, grid);
+  openru_trace::emit(slot.sfn(), slot.slot_index(), "radio_handoff", "dl");
   nof_dl_tx.fetch_add(1, std::memory_order_relaxed);
 }
 

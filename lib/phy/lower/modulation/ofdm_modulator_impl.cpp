@@ -8,6 +8,7 @@
 #include "ocudu/ocuduvec/zero.h"
 #include "ocudu/phy/support/resource_grid_reader.h"
 #include "ocudu/ran/subcarrier_spacing.h"
+#include "ocudu/support/openru_trace.h"
 
 using namespace ocudu;
 
@@ -125,5 +126,9 @@ void ofdm_slot_modulator_impl::modulate(span<cf_t>                  output,
 
     // Advance output buffer.
     output = output.last(output.size() - symbol_sz);
+  }
+  // Compute-time probe (iFFT + CP). SFN unknown here — slot_index is within-subframe.
+  if (port_index == 0) {
+    openru_trace::emit(0, slot_index, "ifft_done", "dl");
   }
 }

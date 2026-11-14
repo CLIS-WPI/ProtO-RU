@@ -3,6 +3,7 @@
 
 #include "ofh_ru_rx_uplane_data_flow.h"
 #include "ocudu/ofh/serdes/ofh_uplane_message_decoder_properties.h"
+#include "ocudu/support/openru_trace.h"
 
 using namespace ocudu;
 using namespace ofh;
@@ -19,10 +20,12 @@ ru_rx_uplane_data_flow::ru_rx_uplane_data_flow(const ru_rx_uplane_data_flow_conf
 
 void ru_rx_uplane_data_flow::decode_message(unsigned eaxc, span<const uint8_t> message)
 {
+  openru_trace::emit(0, 0, "uplane_rx", "dl");
   uplane_message_decoder_results results;
   if (!uplane_decoder->decode(results, message)) {
     return;
   }
+  openru_trace::emit(results.params.slot.sfn(), results.params.slot.slot_index(), "decompress_done", "dl");
 
   // The symbol writer drops the message if no grid was prepared for this slot/symbol (i.e. no Control-Plane message was
   // received for it), so an O-RU does not need the O-DU's Control-Plane filter-index validation here.
