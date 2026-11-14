@@ -174,7 +174,8 @@ bool radio_session_null_impl::parse_args(const std::string& args,
                                          pace_mode&         pace,
                                          unsigned&          scs_khz,
                                          uint64_t&          max_dump_bytes,
-                                         uint64_t&          max_dump_slots)
+                                         uint64_t&          max_dump_slots,
+                                         unsigned&          dump_start_stable_slots)
 {
   tx_dump = extract_kv(args, "tx_dump");
   if (tx_dump.empty()) {
@@ -201,6 +202,10 @@ bool radio_session_null_impl::parse_args(const std::string& args,
   const std::string mds = extract_kv(args, "max_dump_slots");
   if (!mds.empty()) {
     max_dump_slots = std::stoull(mds);
+  }
+  const std::string dss = extract_kv(args, "dump_start_stable_slots");
+  if (!dss.empty()) {
+    dump_start_stable_slots = static_cast<unsigned>(std::stoul(dss));
   }
   return !tx_dump.empty() || !rx_feed.empty() || args.empty() || !pace_s.empty();
 }
@@ -324,6 +329,40 @@ void radio_session_null_impl::writer_loop()
     slot_of_du(blk.ts, du_sfn, du_slot);
     slot_of_radio(blk.ts, radio_sfn, radio_slot);
 
+    // Δ gate: the GPS/OFH slot vs the free-running radio slot settles at cold
+    // start. Do not write anything until that residual is constant for N
+    // consecutive slots; restart-2's -1052 outlier is exactly this transient.
+    if (!dump_started) {
+      const unsigned spf    = 10u * (scs_khz / 15u);
+      const int      period = static_cast<int>(256u * spf);
+      int            delta  = static_cast<int>(du_sfn * spf + du_slot) -
+                             static_cast<int>(radio_sfn * spf + radio_slot);
+      delta = ((delta + period / 2) % period + period) % period - period / 2;
+
+      if (dump_start_stable_slots > 0) {
+        if (have_stable_delta && delta == stable_delta) {
+          ++delta_stable_count;
+        } else {
+          stable_delta       = delta;
+          have_stable_delta  = true;
+          delta_stable_count = 1;
+        }
+        if (delta_stable_count < dump_start_stable_slots) {
+          dump_prestart_dropped.fetch_add(1, std::memory_order_relaxed);
+          continue;
+        }
+      }
+      dump_started             = true;
+      first_du_sfn             = static_cast<int>(du_sfn);
+      first_du_slot            = static_cast<int>(du_slot);
+      first_dump_sample_offset = static_cast<uint64_t>(blk.ts - start_ts);
+      logger.info("null radio: dump start after {} stable slots at DU slot {}.{} (delta={})",
+                  delta_stable_count,
+                  du_sfn,
+                  du_slot,
+                  stable_delta);
+    }
+
     if (max_dump_slots > 0 && dump_slots_written.load() >= max_dump_slots) {
       fail_dump("max_dump_slots reached", du_sfn, du_slot);
       dump_dropped_buffers.fetch_add(1, std::memory_order_relaxed);
@@ -426,7 +465,14 @@ radio_session_null_impl::radio_session_null_impl(const radio_configuration::radi
   logger(ocudulog::fetch_basic_logger("RADIO", false)), tx_ring(TX_RING_CAP)
 {
   sampling_rate_Hz = config.sampling_rate_Hz;
-  if (!parse_args(config.args, tx_dump_dir, rx_feed_dir, pace, scs_khz, max_dump_bytes, max_dump_slots)) {
+  if (!parse_args(config.args,
+                  tx_dump_dir,
+                  rx_feed_dir,
+                  pace,
+                  scs_khz,
+                  max_dump_bytes,
+                  max_dump_slots,
+                  dump_start_stable_slots)) {
     logger.error("null radio: failed to parse args '{}'", config.args);
     return;
   }
@@ -450,7 +496,7 @@ radio_session_null_impl::radio_session_null_impl(const radio_configuration::radi
   successful = true;
   logger.info(
       "null radio ready: tx_dump='{}' rx_feed='{}' pace={} tx_ports={} rx_ports={} srate={:.2f}Hz "
-      "samples_per_slot={} max_dump_slots={} max_dump_bytes={}{}",
+      "samples_per_slot={} max_dump_slots={} max_dump_bytes={} dump_start_stable_slots={}{}",
       tx_dump_dir,
       rx_feed_dir,
       pace == pace_mode::realtime ? "realtime" : "free",
@@ -460,6 +506,7 @@ radio_session_null_impl::radio_session_null_impl(const radio_configuration::radi
       samples_per_slot,
       max_dump_slots,
       max_dump_bytes,
+      dump_start_stable_slots,
       pace == pace_mode::free ? " [OFFLINE THROUGHPUT — not a timing claim]" : "");
 }
 
@@ -536,6 +583,13 @@ void radio_session_null_impl::write_sidecar_json() const
       << "    \"dropped_buffers\": " << dump_dropped_buffers.load() << ",\n"
       << "    \"cap_reached\": " << (dump_cap_reached.load() ? "true" : "false") << ",\n"
       << "    \"stop_reason\": \"" << dump_stop_reason << "\",\n"
+      << "    \"dump_started\": " << (dump_started ? "true" : "false") << ",\n"
+      << "    \"dump_start_stable_slots\": " << dump_start_stable_slots << ",\n"
+      << "    \"dump_start_delta\": " << (have_stable_delta ? stable_delta : 0) << ",\n"
+      << "    \"prestart_dropped_buffers\": " << dump_prestart_dropped.load() << ",\n"
+      << "    \"first_du_sfn\": " << first_du_sfn << ",\n"
+      << "    \"first_du_slot\": " << first_du_slot << ",\n"
+      << "    \"first_dump_sample_offset\": " << first_dump_sample_offset << ",\n"
       << "    \"last_du_sfn\": " << last_du_sfn << ",\n"
       << "    \"last_du_slot\": " << last_du_slot << "\n"
       << "  },\n"

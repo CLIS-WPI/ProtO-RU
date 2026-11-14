@@ -68,6 +68,9 @@ private:
   uint64_t                max_dump_bytes = 0;
   /// 0 = unlimited. Caps how many slots are written to .cf32 / tx_index.
   uint64_t                max_dump_slots = 0;
+  /// Start dumping only after the DU/OFH-vs-radio slot residual has been constant
+  /// for this many consecutive slots. 0 disables the gate (legacy goldens).
+  unsigned                dump_start_stable_slots = 100;
 
   std::atomic<baseband_gateway_timestamp> current_time{0};
   baseband_gateway_timestamp              start_ts{0};
@@ -96,6 +99,14 @@ private:
   std::atomic<uint64_t> dump_dropped_buffers{0};
   int                   last_du_sfn{-1};
   int                   last_du_slot{-1};
+  int                   first_du_sfn{-1};
+  int                   first_du_slot{-1};
+  uint64_t              first_dump_sample_offset{0};
+  bool                  dump_started{false};
+  int                   stable_delta{0};
+  bool                  have_stable_delta{false};
+  unsigned              delta_stable_count{0};
+  std::atomic<uint64_t> dump_prestart_dropped{0};
   std::string           dump_stop_reason;
 
   void enqueue_tx(tx_block&& blk);
@@ -112,7 +123,8 @@ private:
                          pace_mode&         pace,
                          unsigned&          scs_khz,
                          uint64_t&          max_dump_bytes,
-                         uint64_t&          max_dump_slots);
+                         uint64_t&          max_dump_slots,
+                         unsigned&          dump_start_stable_slots);
 };
 
 } // namespace ocudu
