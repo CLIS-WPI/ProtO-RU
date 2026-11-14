@@ -351,15 +351,21 @@ void radio_session_null_impl::writer_loop()
           dump_prestart_dropped.fetch_add(1, std::memory_order_relaxed);
           continue;
         }
+        // Deterministic capture window: start at the first block of the next
+        // SFN period (SFN 0, slot 0). The N-slot stability check above already
+        // excludes the cold-start settle; the boundary keeps first_du fixed at
+        // 0.0 across runs instead of following the variable alignment point.
+        if ((du_sfn != 0) || (du_slot != 0)) {
+          dump_prestart_dropped.fetch_add(1, std::memory_order_relaxed);
+          continue;
+        }
       }
       dump_started             = true;
       first_du_sfn             = static_cast<int>(du_sfn);
       first_du_slot            = static_cast<int>(du_slot);
       first_dump_sample_offset = static_cast<uint64_t>(blk.ts - start_ts);
-      logger.info("null radio: dump start after {} stable slots at DU slot {}.{} (delta={})",
+      logger.info("null radio: dump start at SFN 0.0 after {} stable slots (delta={})",
                   delta_stable_count,
-                  du_sfn,
-                  du_slot,
                   stable_delta);
     }
 
@@ -585,6 +591,7 @@ void radio_session_null_impl::write_sidecar_json() const
       << "    \"stop_reason\": \"" << dump_stop_reason << "\",\n"
       << "    \"dump_started\": " << (dump_started ? "true" : "false") << ",\n"
       << "    \"dump_start_stable_slots\": " << dump_start_stable_slots << ",\n"
+      << "    \"dump_start_at_sfn0\": " << (dump_start_stable_slots > 0 ? "true" : "false") << ",\n"
       << "    \"dump_start_delta\": " << (have_stable_delta ? stable_delta : 0) << ",\n"
       << "    \"prestart_dropped_buffers\": " << dump_prestart_dropped.load() << ",\n"
       << "    \"first_du_sfn\": " << first_du_sfn << ",\n"
