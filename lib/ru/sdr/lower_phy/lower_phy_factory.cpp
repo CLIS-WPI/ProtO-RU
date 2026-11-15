@@ -17,7 +17,11 @@ static std::shared_ptr<lower_phy_factory> create_lower_phy_factory(const lower_p
 
   // Create DFT factory. It tries to create a FFTW based factory. If FFTW library is not available, it creates a generic
   // DFT factory.
+#if defined(OPENRU_FFTW_ESTIMATE)
+  std::shared_ptr<dft_processor_factory> dft_factory = create_dft_processor_factory_fftw_slow();
+#else
   std::shared_ptr<dft_processor_factory> dft_factory = create_dft_processor_factory_fftw_fast();
+#endif
   if (dft_factory == nullptr) {
     dft_factory = create_dft_processor_factory_generic();
   }
