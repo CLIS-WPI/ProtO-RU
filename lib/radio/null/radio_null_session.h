@@ -71,6 +71,14 @@ private:
   /// Start dumping only after the DU/OFH-vs-radio slot residual has been constant
   /// for this many consecutive slots. 0 disables the gate (legacy goldens).
   unsigned                dump_start_stable_slots = 100;
+  /// Wire DU slot (mod OFH period) the dump window must start at. -1 keeps the
+  /// legacy "next SFN 0.0" gate.
+  int                     dump_start_du_slot = -1;
+  /// Optional marker file: the gate is disarmed until the replayer creates it,
+  /// so the window is anchored to the pcap content rather than free-running time.
+  std::string             dump_start_marker;
+  /// Replayer C-plane lead in microseconds (echoed into iq_meta.json).
+  unsigned                align_cplane_lead_us = 0;
 
   std::atomic<baseband_gateway_timestamp> current_time{0};
   baseband_gateway_timestamp              start_ts{0};
@@ -108,6 +116,7 @@ private:
   int                   stable_delta{0};
   bool                  have_stable_delta{false};
   unsigned              delta_stable_count{0};
+  bool                  marker_seen{false};
   std::atomic<uint64_t> dump_prestart_dropped{0};
   std::string           dump_stop_reason;
 
@@ -126,7 +135,10 @@ private:
                          unsigned&          scs_khz,
                          uint64_t&          max_dump_bytes,
                          uint64_t&          max_dump_slots,
-                         unsigned&          dump_start_stable_slots);
+                         unsigned&          dump_start_stable_slots,
+                         int&               dump_start_du_slot,
+                         std::string&       dump_start_marker,
+                         unsigned&          align_cplane_lead_us);
 };
 
 } // namespace ocudu

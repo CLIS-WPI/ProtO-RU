@@ -175,7 +175,10 @@ bool radio_session_null_impl::parse_args(const std::string& args,
                                          unsigned&          scs_khz,
                                          uint64_t&          max_dump_bytes,
                                          uint64_t&          max_dump_slots,
-                                         unsigned&          dump_start_stable_slots)
+                                         unsigned&          dump_start_stable_slots,
+                                         int&               dump_start_du_slot,
+                                         std::string&       dump_start_marker,
+                                         unsigned&          align_cplane_lead_us)
 {
   tx_dump = extract_kv(args, "tx_dump");
   if (tx_dump.empty()) {
@@ -206,6 +209,15 @@ bool radio_session_null_impl::parse_args(const std::string& args,
   const std::string dss = extract_kv(args, "dump_start_stable_slots");
   if (!dss.empty()) {
     dump_start_stable_slots = static_cast<unsigned>(std::stoul(dss));
+  }
+  const std::string dds = extract_kv(args, "dump_start_du_slot");
+  if (!dds.empty()) {
+    dump_start_du_slot = static_cast<int>(std::stol(dds));
+  }
+  dump_start_marker = extract_kv(args, "dump_start_marker");
+  const std::string acl = extract_kv(args, "align_cplane_lead_us");
+  if (!acl.empty()) {
+    align_cplane_lead_us = static_cast<unsigned>(std::stoul(acl));
   }
   return !tx_dump.empty() || !rx_feed.empty() || args.empty() || !pace_s.empty();
 }
@@ -285,11 +297,23 @@ void radio_session_null_impl::writer_loop()
   sp.sched_priority = 0;
   pthread_setschedparam(pthread_self(), SCHED_OTHER, &sp);
 
+  auto flush_dump = [&]() {
+    for (unsigned p = 0; p < nof_tx_ports; ++p) {
+      if (ports[p].is_open()) {
+        ports[p].flush();
+      }
+    }
+    if (tx_index.is_open()) {
+      tx_index.flush();
+    }
+  };
+
   auto fail_dump = [&](const std::string& reason, unsigned du_sfn, unsigned du_slot) {
     if (dump_cap_reached.exchange(true)) {
       return;
     }
     dump_stop_reason = reason;
+    flush_dump();
     last_du_sfn      = static_cast<int>(du_sfn);
     last_du_slot     = static_cast<int>(du_slot);
     logger.warning("null radio: dump stop — {} at DU slot {}.{} (bytes={} slots={} dropped={})",
@@ -351,11 +375,25 @@ void radio_session_null_impl::writer_loop()
           dump_prestart_dropped.fetch_add(1, std::memory_order_relaxed);
           continue;
         }
-        // Deterministic capture window: start at the first block of the next
-        // SFN period (SFN 0, slot 0). The N-slot stability check above already
-        // excludes the cold-start settle; the boundary keeps first_du fixed at
-        // 0.0 across runs instead of following the variable alignment point.
-        if ((du_sfn != 0) || (du_slot != 0)) {
+        // Anchor the capture window to the pcap content: with an explicit wire DU slot, wait for that slot; the replay
+        // marker keeps the gate disarmed until the replayer is actually sending, so the first occurrence is the one the
+        // pcap window was computed from.
+        if (dump_start_du_slot >= 0) {
+          if (!dump_start_marker.empty() && !marker_seen) {
+            if (!fs::exists(dump_start_marker)) {
+              dump_prestart_dropped.fetch_add(1, std::memory_order_relaxed);
+              continue;
+            }
+            marker_seen = true;
+          }
+          const int period_slots = static_cast<int>(256u * spf);
+          const int wire_slot    = static_cast<int>((du_sfn * spf + du_slot) % static_cast<unsigned>(period_slots));
+          if (wire_slot != (dump_start_du_slot % period_slots)) {
+            dump_prestart_dropped.fetch_add(1, std::memory_order_relaxed);
+            continue;
+          }
+        } else if ((du_sfn != 0) || (du_slot != 0)) {
+          // Legacy deterministic window: the first block of the next SFN period (SFN 0, slot 0).
           dump_prestart_dropped.fetch_add(1, std::memory_order_relaxed);
           continue;
         }
@@ -364,7 +402,9 @@ void radio_session_null_impl::writer_loop()
       first_du_sfn             = static_cast<int>(du_sfn);
       first_du_slot            = static_cast<int>(du_slot);
       first_dump_sample_offset = 0; // file starts at the first dumped block
-      logger.info("null radio: dump start at SFN 0.0 after {} stable slots (delta={})",
+      logger.info("null radio: dump start at DU slot {}.{} after {} stable slots (delta={})",
+                  du_sfn,
+                  du_slot,
                   delta_stable_count,
                   stable_delta);
     }
@@ -486,7 +526,10 @@ radio_session_null_impl::radio_session_null_impl(const radio_configuration::radi
                   scs_khz,
                   max_dump_bytes,
                   max_dump_slots,
-                  dump_start_stable_slots)) {
+                  dump_start_stable_slots,
+                  dump_start_du_slot,
+                  dump_start_marker,
+                  align_cplane_lead_us)) {
     logger.error("null radio: failed to parse args '{}'", config.args);
     return;
   }
@@ -510,7 +553,8 @@ radio_session_null_impl::radio_session_null_impl(const radio_configuration::radi
   successful = true;
   logger.info(
       "null radio ready: tx_dump='{}' rx_feed='{}' pace={} tx_ports={} rx_ports={} srate={:.2f}Hz "
-      "samples_per_slot={} max_dump_slots={} max_dump_bytes={} dump_start_stable_slots={}{}",
+      "samples_per_slot={} max_dump_slots={} max_dump_bytes={} dump_start_stable_slots={} "
+      "dump_start_du_slot={} marker='{}' align_cplane_lead_us={}{}",
       tx_dump_dir,
       rx_feed_dir,
       pace == pace_mode::realtime ? "realtime" : "free",
@@ -521,6 +565,9 @@ radio_session_null_impl::radio_session_null_impl(const radio_configuration::radi
       max_dump_slots,
       max_dump_bytes,
       dump_start_stable_slots,
+      dump_start_du_slot,
+      dump_start_marker,
+      align_cplane_lead_us,
       pace == pace_mode::free ? " [OFFLINE THROUGHPUT — not a timing claim]" : "");
 }
 
@@ -600,6 +647,10 @@ void radio_session_null_impl::write_sidecar_json() const
       << "    \"dump_started\": " << (dump_started ? "true" : "false") << ",\n"
       << "    \"dump_start_stable_slots\": " << dump_start_stable_slots << ",\n"
       << "    \"dump_start_at_sfn0\": " << (dump_start_stable_slots > 0 ? "true" : "false") << ",\n"
+      << "    \"dump_start_mode\": \"" << (dump_start_du_slot >= 0 ? "du_slot" : "sfn0") << "\",\n"
+      << "    \"dump_start_du_slot\": " << dump_start_du_slot << ",\n"
+      << "    \"dump_start_marker\": \"" << dump_start_marker << "\",\n"
+      << "    \"align_cplane_lead_us\": " << align_cplane_lead_us << ",\n"
       << "    \"dump_start_delta\": " << (have_stable_delta ? stable_delta : 0) << ",\n"
       << "    \"prestart_dropped_buffers\": " << dump_prestart_dropped.load() << ",\n"
       << "    \"first_du_sfn\": " << first_du_sfn << ",\n"
