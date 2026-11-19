@@ -35,6 +35,18 @@ slot_point to_slot_point(slot_point_extended slot)
   return slot_point(slot.scs(), slot.count() % slot.nof_slots_per_hyper_system_frame());
 }
 
+/// Subtracts \c lookback from an Open Fronthaul wire slot, wrapping in the 8-bit-SFN wire numbering.
+///
+/// \c slot_point arithmetic wraps at the 1024-frame hyperframe, but the wire slots the O-DU sends wrap at 256 frames.
+/// Subtracting the PRACH lookback with \c slot_point would therefore cross the wrong boundary when the peeked occasion
+/// sits in the last wire frame, turning wire slot 255.x into 1023.x and missing the recorded request.
+slot_point subtract_wire_slots(slot_point slot, unsigned lookback)
+{
+  const unsigned period = gps_slot_alignment::nof_slots_per_ofh_period(to_subcarrier_spacing(slot.numerology()));
+  const unsigned system_slot = (slot.system_slot() + period - (lookback % period)) % period;
+  return slot_point(slot.numerology(), system_slot);
+}
+
 /// \brief Builds the hardcoded PRACH capture context shared by every occasion (slot and start symbol are filled in per
 /// occasion). The O-RAN Control-Plane does not carry the PRACH detector configuration, so the O-RU emulator assumes a
 /// short format B4 with a single time/frequency-domain occasion. PRACH is captured on every uplink antenna (one capture
@@ -127,7 +139,7 @@ void ru_emulator_tti_orchestrator::on_tti_boundary(const tti_boundary_context& s
   // received-symbol path into the sector's uplink IQ sink, where it is matched against the recorded PRACH
   // Control-Plane and turned into a PRACH User-Plane reply.
   slot_point prach_radio_slot = radio_slot - prach_peek_lookback_slots;
-  slot_point prach_ofh_slot   = ofh_slot - prach_peek_lookback_slots;
+  slot_point prach_ofh_slot   = subtract_wire_slots(ofh_slot, prach_peek_lookback_slots);
   if (std::optional<ofh::ru_prach_occasion> occasion = sector.get_recorded_prach_occasion(prach_ofh_slot)) {
     // SDR capture is currently configured for short B4, whose PRACH SCS equals the PUSCH/cell SCS. Do not capture a
     // differently-spaced request using the wrong lower-PHY context.
