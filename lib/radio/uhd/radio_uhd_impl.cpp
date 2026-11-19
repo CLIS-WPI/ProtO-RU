@@ -285,8 +285,13 @@ radio_session_uhd_impl::radio_session_uhd_impl(const radio_configuration::radio&
     set_time_to_gps_time();
   } else if ((total_rx_channel_count > 1) || (total_tx_channel_count > 1) ||
              (radio_config.clock.sync == radio_configuration::clock_sources::source::EXTERNAL)) {
-    // Set time zero to the next pulse.
-    device.set_time_unknown_pps(uhd::time_spec_t());
+    // Set time zero to the next pulse. Fail closed: continuing with a zero
+    // radio timestamp makes ru_controller_sdr_impl::start() compute a time
+    // before zero and underflow the stream start timestamp.
+    if (!device.set_time_unknown_pps(uhd::time_spec_t())) {
+      fmt::print("Error: failed to set USRP time to the next PPS. {}\n", device.get_error_message());
+      return;
+    }
   }
 
   // Lists of stream descriptions.

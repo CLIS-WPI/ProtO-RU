@@ -8,6 +8,7 @@
 #include "radio_uhd_rx_stream.h"
 #include "radio_uhd_tx_stream.h"
 #include "ocudu/ocudulog/ocudulog.h"
+#include <uhd/version.hpp>
 
 namespace ocudu {
 
@@ -271,7 +272,7 @@ public:
         break;
     }
 
-    logger.debug("Setting PPS source to '{}' and clock source to '{}'.", sync_src, clock_src);
+    logger.debug("Setting clock source to '{}' and PPS source to '{}'.", clock_src, sync_src);
 #if UHD_VERSION < 3140099
     return safe_execution([this, &sync_src, &clock_src]() {
       std::vector<std::string> time_sources = usrp->get_time_sources(0);
@@ -285,11 +286,15 @@ public:
         return;
       }
 
-      usrp->set_time_source(sync_src);
+      // Set the clock first: changing it reinitializes the N3xx clocking and may
+      // reset the timekeeper. Apply the PPS source after the new clock is stable.
       usrp->set_clock_source(clock_src);
+      usrp->set_time_source(sync_src);
     });
 #else
-    return safe_execution([this, &sync_source, &clock_source]() { usrp->set_sync_source(clock_source, sync_source); });
+    // Atomic sync-source update. Splitting it into set_time_source() +
+    // set_clock_source() can reinitialize N3xx clocking twice and reset time.
+    return safe_execution([this, &clock_src, &sync_src]() { usrp->set_sync_source(clock_src, sync_src); });
 #endif
   }
 
