@@ -94,6 +94,9 @@ void data_flow_uplane_data_impl::enqueue_section_type_1_message(const data_flow_
 void data_flow_uplane_data_impl::enqueue_prach_message(const data_flow_uplane_prach_context& context,
                                                        const prach_buffer&                   buffer)
 {
+  // Timestamp the PRACH U-plane hand-off (send time); see the DU's
+  // closed_rx_window_handler for the matching receive deadline.
+  logger.debug("PRACH U-plane send: slot '{}', sector#{}, eAxC '{}'", context.slot, sector_id, context.eaxc);
   trace_point tp = ofh_tracer.now();
 
   const unsigned nof_re = context.nof_prb * NOF_SUBCARRIERS_PER_RB;

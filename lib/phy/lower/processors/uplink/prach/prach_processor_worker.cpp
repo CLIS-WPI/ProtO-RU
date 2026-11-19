@@ -97,6 +97,12 @@ void prach_processor_worker::accumulate_samples(const baseband_gateway_buffer_re
   // Otherwise, transition to processing.
   state = states::processing;
 
+  // Timestamp the end of the PRACH window: this is the moment the PRACH samples
+  // are complete and the demodulation can start. It must stay inside the PRACH
+  // slot for the DU window (next slot symbol 0) to be met.
+  ru_tracer << instant_trace_event{"prach_window_ready", instant_trace_event::cpu_scope::thread};
+  logger.debug("PRACH window complete: slot '{}', {} samples collected", prach_context.slot, nof_samples);
+
   if (!async_task_executor.defer([this, nof_ports, moved_token = std::move(token)]() {
         trace_point tp = ru_tracer.now();
 
@@ -124,9 +130,16 @@ void prach_processor_worker::accumulate_samples(const baseband_gateway_buffer_re
         }
 
         ru_tracer << trace_event("prach_demodulate", tp);
+        ru_tracer << instant_trace_event{"prach_window_demodulated", instant_trace_event::cpu_scope::thread};
+
+        logger.debug("PRACH demodulation done: slot '{}', {} ports; notifying the OFH uplink data flow",
+                     prach_context.slot,
+                     nof_ports);
 
         // Notify PRACH window reception.
         notifier->on_rx_prach_window(std::move(buffer), prach_context);
+
+        ru_tracer << instant_trace_event{"prach_window_notified", instant_trace_event::cpu_scope::thread};
 
         // Transition to idle.
         state = states::idle;
