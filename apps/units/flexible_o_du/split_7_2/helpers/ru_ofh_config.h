@@ -86,6 +86,12 @@ struct ru_ofh_unit_base_cell_config {
   std::chrono::microseconds Ta4_min{85};
   /// Enables the Control-Plane PRACH message signalling.
   bool is_prach_control_plane_enabled = true;
+  /// \brief Extra slots to wait before closing the PRACH reception window.
+  ///
+  /// The DU normally closes the PRACH window at the next slot's symbol 0. A positive value pops the PRACH context
+  /// 1 + prach_rx_extra_slots after the PRACH slot, which lets an RU that builds the U-Plane reply after the occasion
+  /// ends deliver it in time. Zero keeps the legacy behaviour.
+  unsigned prach_rx_extra_slots = 0;
   /// Ignore the start symbol value received in the PRACH U-Plane packets.
   bool ignore_prach_start_symbol = false;
   /// If set to true, the payload size encoded in a eCPRI header is ignored.

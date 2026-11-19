@@ -59,6 +59,7 @@ static closed_rx_window_handler_config get_closed_rx_window_handler_config(const
   out_config.sector                 = config.sector;
   out_config.warn_unreceived_frames = config.log_unreceived_ru_frames;
   out_config.rx_timing_params       = config.rx_timing_params;
+  out_config.prach_rx_extra_slots   = config.prach_rx_extra_slots;
   // As it runs in the same executor, do not delay the reception window close.
   out_config.nof_symbols_to_process_uplink = 0;
 

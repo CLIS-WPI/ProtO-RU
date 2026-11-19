@@ -88,6 +88,7 @@ static YAML::Node build_ru_ofh_cell_section(const ru_ofh_unit_cell_config& confi
   node["ta4_max"]                    = config.cell.Ta4_max.count();
   node["ta4_min"]                    = config.cell.Ta4_min.count();
   node["is_prach_cp_enabled"]        = config.cell.is_prach_control_plane_enabled;
+  node["prach_rx_extra_slots"]       = config.cell.prach_rx_extra_slots;
   node["ignore_prach_start_symbol"]  = config.cell.ignore_prach_start_symbol;
   node["ignore_ecpri_seq_id"]        = config.cell.ignore_ecpri_seq_id_field;
   node["ignore_ecpri_payload_size"]  = config.cell.ignore_ecpri_payload_size_field;
