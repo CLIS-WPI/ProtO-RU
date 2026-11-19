@@ -4,6 +4,7 @@
 
 #include "ru_ofh_config_translator.h"
 #include "apps/services/worker_manager/worker_manager_config.h"
+#include "lib/ofh/support/context_repository_helpers.h"
 #include "ru_ofh_config.h"
 
 using namespace ocudu;
@@ -112,6 +113,22 @@ static void generate_config(ru_ofh_configuration&                            out
     sector_cfg.rx_window_timing_params =
         rx_timing_window_params_us_to_symbols(ofh_cell_cfg.cell.Ta4_max, ofh_cell_cfg.cell.Ta4_min, symbol_duration);
     sector_cfg.is_prach_control_plane_enabled  = ofh_cell_cfg.cell.is_prach_control_plane_enabled;
+    sector_cfg.prach_rx_extra_slots            = ofh_cell_cfg.cell.prach_rx_extra_slots;
+
+    // The PRACH context repository uses the same sizing as the OFH sector (see create_ofh_sector). The DU pops
+    // 1 + extra slots after the PRACH slot, so that delay must leave two entries free in the ring: one for the pop
+    // itself and one so the in-flight context cannot be overwritten.
+    unsigned prach_repo_size = ofh::calculate_repository_size(sector_cfg.scs, max_processing_delay_slots * 4);
+    if (1U + sector_cfg.prach_rx_extra_slots > prach_repo_size - 2U) {
+      report_error("Invalid Open Fronthaul Radio Unit configuration detected: ru_ofh prach_rx_extra_slots={} at SCS "
+                   "'{}' needs 1 + extra <= {} slots (PRACH context ring is {} slots, max_proc_delay={})\n",
+                   sector_cfg.prach_rx_extra_slots,
+                   to_string(sector_cfg.scs),
+                   prach_repo_size - 2U,
+                   prach_repo_size,
+                   max_processing_delay_slots);
+    }
+
     sector_cfg.ignore_prach_start_symbol       = ofh_cell_cfg.cell.ignore_prach_start_symbol;
     sector_cfg.ignore_ecpri_payload_size_field = ofh_cell_cfg.cell.ignore_ecpri_payload_size_field;
     sector_cfg.ignore_ecpri_seq_id_field       = ofh_cell_cfg.cell.ignore_ecpri_seq_id_field;

@@ -207,3 +207,28 @@ TEST(ru_emulator_tti_orchestrator_test, boundary_before_connect_is_ignored)
   // No handler connected yet: the boundary is a no-op (does not crash).
   orchestrator->on_tti_boundary(make_tti(5));
 }
+
+TEST(ru_emulator_tti_orchestrator_test, prach_lookback_wraps_in_wire_numbering)
+{
+  auto sdr_upper_phy = create_ru_emulator_sdr_upper_phy({/*sector=*/0, /*nof_prb=*/51, /*nof_dl_ports=*/1});
+
+  // Wire slots wrap at 256 frames, so wire slot 0.1 peeks 255.19 with a two-slot lookback. slot_point arithmetic alone
+  // wraps at 1024 frames and would produce 1023.19 instead.
+  const slot_point prach_ofh_slot(to_numerology_value(subcarrier_spacing::kHz30), 255 * 20 + 19);
+  ru_sector_spy    sector;
+  sector.occasion = ofh::ru_prach_occasion{
+      prach_ofh_slot, /*eaxc=*/4, /*start_symbol=*/2, /*rb_offset=*/6, prach_subcarrier_spacing::kHz30};
+
+  auto orchestrator =
+      create_ru_emulator_tti_orchestrator(make_config(), ocudulog::fetch_basic_logger("TEST"), *sdr_upper_phy, sector);
+  uplink_plane_handler_spy ul;
+  orchestrator->connect(ul);
+
+  // Radio slot 1 maps to wire slot 0.1 with a zero GPS offset.
+  orchestrator->on_tti_boundary(make_tti(1));
+
+  ASSERT_EQ(ul.nof_prach_requests, 1);
+  ASSERT_EQ(ul.last_prach_context.slot, slot_point(to_numerology_value(subcarrier_spacing::kHz30), 1) - PRACH_LOOKBACK);
+  ASSERT_EQ(ul.last_prach_context.start_symbol, 2);
+  ASSERT_EQ(ul.last_prach_context.rb_offset, 6);
+}

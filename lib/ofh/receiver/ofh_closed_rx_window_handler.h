@@ -31,6 +31,8 @@ struct closed_rx_window_handler_config {
   unsigned nof_symbols_to_process_uplink = 0;
   /// Open Fronthaul receive window parameters.
   rx_window_timing_parameters rx_timing_params;
+  /// Extra slots to wait before closing the PRACH reception window.
+  unsigned prach_rx_extra_slots = 0;
   /// Warn unreceived Open Fronthaul messages.
   warn_unreceived_ru_frames warn_unreceived_frames = warn_unreceived_ru_frames::after_traffic_detection;
 };
@@ -89,6 +91,7 @@ private:
   /// Open Fronthaul message.
   const unsigned                              notification_delay_in_symbols;
   const unsigned                              sector_id;
+  const unsigned                              prach_rx_extra_slots;
   const warn_unreceived_ru_frames             warn_unreceived_frames;
   bool                                        log_unreceived_messages;
   ocudulog::basic_logger&                     logger;

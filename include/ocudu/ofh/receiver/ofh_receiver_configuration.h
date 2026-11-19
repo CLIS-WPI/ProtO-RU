@@ -48,6 +48,8 @@ struct receiver_config {
   bool is_uplink_static_compr_hdr_enabled = true;
   /// Enables the Control-Plane PRACH message signalling.
   bool is_prach_control_plane_enabled = false;
+  /// Extra slots to wait before closing the PRACH reception window.
+  unsigned prach_rx_extra_slots = 0;
   /// Ignore the start symbol value received in the PRACH U-Plane packets.
   bool ignore_prach_start_symbol = false;
   /// If set to true, the payload size encoded in a eCPRI header is ignored.

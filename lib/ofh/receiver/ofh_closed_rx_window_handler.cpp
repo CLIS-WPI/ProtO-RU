@@ -12,6 +12,7 @@ closed_rx_window_handler::closed_rx_window_handler(const closed_rx_window_handle
                                                    closed_rx_window_handler_dependencies&& dependencies) :
   notification_delay_in_symbols(config.nof_symbols_to_process_uplink + config.rx_timing_params.sym_end + 1),
   sector_id(config.sector),
+  prach_rx_extra_slots(config.prach_rx_extra_slots),
   warn_unreceived_frames(config.warn_unreceived_frames),
   log_unreceived_messages(config.warn_unreceived_frames == warn_unreceived_ru_frames::always),
   logger(*dependencies.logger),
@@ -98,7 +99,7 @@ void closed_rx_window_handler::handle_prach_context(slot_symbol_point symbol_poi
     return;
   }
 
-  slot_point slot    = symbol_point.get_slot() - 1;
+  slot_point slot    = symbol_point.get_slot() - 1 - prach_rx_extra_slots;
   auto       context = prach_repo->pop_prach_buffer(slot);
 
   // Nothing to do.
