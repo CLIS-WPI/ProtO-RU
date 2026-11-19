@@ -211,6 +211,11 @@ public:
     return safe_execution([this, &tx_antenna, channel_id]() { tx_antenna = usrp->get_tx_antenna(channel_id); });
   }
 
+  bool set_tx_antenna(const std::string& tx_antenna, unsigned channel_id)
+  {
+    return safe_execution([this, &tx_antenna, channel_id]() { usrp->set_tx_antenna(tx_antenna, channel_id); });
+  }
+
   bool set_automatic_master_clock_rate(double srate_Hz)
   {
     // Skip automatic master clock rate if it is not available.

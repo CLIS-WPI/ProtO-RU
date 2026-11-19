@@ -49,6 +49,9 @@ struct channel {
   lo_frequency freq;
   /// Initial gain in decibels.
   double gain_dB;
+  /// \brief UHD antenna port name for this channel (e.g. N310 \c "TX/RX" or \c "RX2").
+  /// Empty leaves the driver's default (N310: TX antenna \c TX/RX, RX antenna \c RX2).
+  std::string antenna;
   /// \brief Indicates any device specific parameters to create the port.
   /// \remark Not all driver and/or devices support this feature.
   std::string args;

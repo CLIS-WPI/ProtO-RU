@@ -110,6 +110,10 @@ static void configure_cli11_sdr_args(CLI::App& app, std::optional<ru_emulator_sd
                  "derived from the cell UL ARFCN and NR band)");
   app.add_option("--tx_gain", cfg.tx_gain_dB, "Transmit gain in dB")->capture_default_str();
   app.add_option("--rx_gain", cfg.rx_gain_dB, "Receive gain in dB")->capture_default_str();
+  app.add_option("--tx_antenna", cfg.tx_antenna, "UHD TX antenna name (N310: TX/RX or RX2; empty = driver default)")
+      ->capture_default_str();
+  app.add_option("--rx_antenna", cfg.rx_antenna, "UHD RX antenna name (N310: TX/RX or RX2; empty = driver default)")
+      ->capture_default_str();
   app.add_option("--center_freq_offset", cfg.center_freq_offset_Hz, "Centre frequency offset in Hz (RF calibration)")
       ->capture_default_str();
   app.add_option("--calibrate_clock_ppm", cfg.calibrate_clock_ppm, "Clock calibration in PPM (carrier frequency)")

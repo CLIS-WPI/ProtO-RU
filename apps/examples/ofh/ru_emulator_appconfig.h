@@ -39,6 +39,11 @@ struct ru_emulator_sdr_appconfig {
   double tx_gain_dB = 60.0;
   /// Receive gain in dB.
   double rx_gain_dB = 60.0;
+  /// UHD TX antenna name. Empty keeps the driver default (N310: "TX/RX").
+  std::string tx_antenna;
+  /// UHD RX antenna name. Empty keeps the driver default (N310: "RX2").
+  /// Ignored when transmission_mode is "same-port" (RX is then copied from TX).
+  std::string rx_antenna;
   /// Centre frequency offset in Hz applied to all radio channels (RF calibration).
   double center_freq_offset_Hz = 0.0;
   /// Clock calibration in PPM, applied to the carrier frequency (corrects the radio oscillator offset; useful on a

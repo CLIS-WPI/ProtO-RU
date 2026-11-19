@@ -48,6 +48,12 @@ static void fill_sdr_section(YAML::Node node, const ru_emulator_sdr_appconfig& c
   }
   node["tx_gain"]            = config.tx_gain_dB;
   node["rx_gain"]            = config.rx_gain_dB;
+  if (!config.tx_antenna.empty()) {
+    node["tx_antenna"] = config.tx_antenna;
+  }
+  if (!config.rx_antenna.empty()) {
+    node["rx_antenna"] = config.rx_antenna;
+  }
   node["center_freq_offset"] = config.center_freq_offset_Hz;
   node["calibrate_clock_ppm"] = config.calibrate_clock_ppm;
   node["lo_offset"]           = config.lo_offset_MHz;

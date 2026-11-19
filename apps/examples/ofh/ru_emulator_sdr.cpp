@@ -105,6 +105,7 @@ ru_sdr_configuration ocudu::generate_ru_emulator_sdr_config(const ru_emulator_sd
     ch.freq.center_frequency_Hz     = dl_center_cal;
     ch.freq.lo_frequency_Hz         = use_lo_offset ? dl_lo_cal : 0.0;
     ch.gain_dB                      = sdr_cfg.tx_gain_dB;
+    ch.antenna                      = sdr_cfg.tx_antenna;
     if (sdr_cfg.device_driver == "zmq") {
       if (port >= zmq_tx_ports.size()) {
         report_error("Not enough ZMQ 'tx_port' arguments for the SDR RU emulator\n");
@@ -121,6 +122,7 @@ ru_sdr_configuration ocudu::generate_ru_emulator_sdr_config(const ru_emulator_sd
     ch.freq.center_frequency_Hz     = ul_center_cal;
     ch.freq.lo_frequency_Hz         = use_lo_offset ? ul_lo_cal : 0.0;
     ch.gain_dB                      = sdr_cfg.rx_gain_dB;
+    ch.antenna                      = sdr_cfg.rx_antenna;
     if (sdr_cfg.device_driver == "zmq") {
       if (port >= zmq_rx_ports.size()) {
         report_error("Not enough ZMQ 'rx_port' arguments for the SDR RU emulator\n");

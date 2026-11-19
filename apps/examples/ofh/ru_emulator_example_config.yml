@@ -91,6 +91,8 @@ ru_emu:
         srate: 23.04                   # MHz; use a rate validated for the selected bandwidth and radio
         tx_gain: 60                    # dB
         rx_gain: 60
+        # tx_antenna: TX/RX             # UHD TX antenna (N310: TX/RX); empty = driver default
+        # rx_antenna: RX2               # UHD RX antenna (N310: RX2). same-port copies TX onto RX.
 
         # Timing discipline. The slot/frame numbering is aligned to the O-DU at runtime against the HOST
         # clock (keep it GPS/NTP-synchronized), so any source works; gpsdo (or a shared external

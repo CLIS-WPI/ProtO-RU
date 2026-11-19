@@ -345,6 +345,18 @@ radio_session_uhd_impl::radio_session_uhd_impl(const radio_configuration::radio&
         return;
       }
 
+      // Setup TX antenna (N310: "TX/RX" vs "RX2"; empty keeps the UHD default).
+      if (!channel.antenna.empty()) {
+        fmt::print("Selecting antenna {} as Tx antenna for channel {}\n", channel.antenna, port_idx);
+        if (!device.set_tx_antenna(channel.antenna, port_idx)) {
+          fmt::print("Error: setting Tx antenna {} on channel {}. {}\n",
+                     channel.antenna,
+                     port_idx,
+                     device.get_error_message());
+          return;
+        }
+      }
+
       // Inform about ignored argument.
       if (!channel.args.empty()) {
         fmt::print("Warning: transmitter {} unused args.\n", port_idx);
@@ -393,6 +405,19 @@ radio_session_uhd_impl::radio_session_uhd_impl(const radio_configuration::radio&
       // Setup frequency.
       if (!set_rx_freq(port_idx, channel.freq)) {
         return;
+      }
+
+      // Setup RX antenna unless same-port mode copies the selected TX antenna.
+      // N310: UHD default RX is "RX2"; "TX/RX" is the combined port used for TX.
+      if (!channel.antenna.empty() && radio_config.tx_mode != radio_configuration::transmission_mode::same_port) {
+        fmt::print("Selecting antenna {} as Rx antenna for channel {}\n", channel.antenna, port_idx);
+        if (!device.set_rx_antenna(channel.antenna, port_idx)) {
+          fmt::print("Error: setting Rx antenna {} on channel {}. {}\n",
+                     channel.antenna,
+                     port_idx,
+                     device.get_error_message());
+          return;
+        }
       }
 
       // Set the same port for TX and RX.

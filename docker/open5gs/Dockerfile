@@ -84,6 +84,13 @@ RUN python3 -m pip install pymongo click pyroute2 ipaddress python-iptables
 
 FROM base AS open5gs
 
+ARG OPENRU_GIT_COMMIT=unknown
+ARG OPENRU_GIT_SUBMODULE=unknown
+ARG OPENRU_BUILD_DATE=unknown
+LABEL org.openru.git.commit=${OPENRU_GIT_COMMIT} \
+      org.openru.git.submodule=${OPENRU_GIT_SUBMODULE} \
+      org.openru.build.date=${OPENRU_BUILD_DATE}
+
 WORKDIR /open5gs
 COPY open5gs-5gc.yml open5gs-5gc.yml.in
 # The wildcard for the subscriber_db.csv tries to copy "subscriber_db.csv" but will not fail if the file doesn't exist

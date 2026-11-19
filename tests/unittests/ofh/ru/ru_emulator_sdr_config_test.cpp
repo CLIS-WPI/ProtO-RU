@@ -182,3 +182,29 @@ TEST(ru_emulator_sdr_config_test, sfn0_start_time_is_anchored_only_on_real_radio
   ASSERT_TRUE(uhd_out.start_time.has_value());
   ASSERT_GT(*uhd_out.start_time, std::chrono::system_clock::now());
 }
+
+TEST(ru_emulator_sdr_config_test, uhd_antenna_names_propagate_to_radio_channels)
+{
+  ru_emulator_sdr_appconfig cfg = make_sdr_config();
+  cfg.device_driver             = "uhd";
+  cfg.device_arguments          = "";
+  cfg.tx_antenna                = "TX/RX";
+  cfg.rx_antenna                = "RX2";
+
+  ru_sdr_configuration out = generate_ru_emulator_sdr_config(cfg,
+                                                             subcarrier_spacing::kHz30,
+                                                             bs_channel_bandwidth::MHz20,
+                                                             /*dl_arfcn=*/632628,
+                                                             /*band=*/std::nullopt,
+                                                             /*nof_tx_antennas=*/2,
+                                                             /*nof_rx_antennas=*/2);
+
+  ASSERT_EQ(out.radio_cfg.tx_streams.front().channels.size(), 2);
+  ASSERT_EQ(out.radio_cfg.rx_streams.front().channels.size(), 2);
+  for (const auto& ch : out.radio_cfg.tx_streams.front().channels) {
+    ASSERT_EQ(ch.antenna, "TX/RX");
+  }
+  for (const auto& ch : out.radio_cfg.rx_streams.front().channels) {
+    ASSERT_EQ(ch.antenna, "RX2");
+  }
+}
