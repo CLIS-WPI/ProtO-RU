@@ -872,6 +872,8 @@ int main(int argc, char** argv)
 
   ocudulog::basic_logger& logger = ocudulog::fetch_basic_logger("RU_EMU", false);
   logger.set_level(ru_emulator_parsed_cfg.log_cfg.level);
+  // The lower PHY/SDR logger otherwise keeps ocudulog's default (debug) and writes a PRACH debug line per slot.
+  ocudulog::fetch_basic_logger("PHY", false).set_level(ru_emulator_parsed_cfg.log_cfg.level);
 
   // Log the whole input configuration, defaults included, whatever the application log level is: a log that carries the
   // configuration that produced it is enough on its own to support someone else's deployment. The dump is built from
