@@ -44,6 +44,17 @@ tti_boundary_context make_tti(uint64_t radio_slot, unsigned gps_slot_offset, int
   return ctx;
 }
 
+/// Consecutive 64-TTI windows the aligner needs to adopt a new offset at 30 kHz (3 s of agreement).
+const unsigned CONFIRM = ru_emulator_gps_slot_aligner::nof_confirm_windows(subcarrier_spacing::kHz30);
+
+/// Feeds \c nof_windows windows of 64 TTIs at the given offset.
+void feed_windows(ru_emulator_gps_slot_aligner& aligner, uint64_t& radio_slot, unsigned offset, unsigned nof_windows)
+{
+  for (unsigned i = 0; i != 64 * nof_windows; ++i, ++radio_slot) {
+    aligner.on_tti_boundary(make_tti(radio_slot, offset));
+  }
+}
+
 } // namespace
 
 TEST(ru_emulator_gps_slot_aligner_test, offset_is_measured_after_the_settle_period_and_reported_once)
@@ -104,16 +115,78 @@ TEST(ru_emulator_gps_slot_aligner_test, sustained_drift_re_aligns_the_offset)
   ASSERT_EQ(reported.size(), 1);
   ASSERT_EQ(reported.front(), base);
 
-  // The radio clock drifted by a slot (offset base+1). The first confirming window only arms the candidate.
-  for (unsigned i = 0; i != 64; ++i, ++radio_slot) {
-    aligner.on_tti_boundary(make_tti(radio_slot, base + 1));
+  // The radio clock drifted by a slot (offset base+1). One window short of the confirmation time nothing changes.
+  ASSERT_EQ(CONFIRM, 94U);
+  feed_windows(aligner, radio_slot, base + 1, CONFIRM - 1);
+  ASSERT_EQ(reported.size(), 1);
+
+  // The window completing REALIGN_CONFIRM_MS of agreement adopts the new offset, once.
+  feed_windows(aligner, radio_slot, base + 1, 1);
+  ASSERT_EQ(reported.size(), 2);
+  ASSERT_EQ(reported.back(), base + 1);
+  feed_windows(aligner, radio_slot, base + 1, 2 * CONFIRM);
+  ASSERT_EQ(reported.size(), 2);
+}
+
+TEST(ru_emulator_gps_slot_aligner_test, agreement_one_window_short_then_back_does_not_re_align)
+{
+  timing_notifier_spy          next;
+  std::vector<unsigned>        reported;
+  ru_emulator_gps_slot_aligner aligner(
+      next, ocudulog::fetch_basic_logger("TEST"), [&reported](unsigned offset) { reported.push_back(offset); });
+
+  const unsigned base       = 500;
+  uint64_t       radio_slot = 0;
+  for (unsigned i = 0; i != 2000 + 64; ++i, ++radio_slot) {
+    aligner.on_tti_boundary(make_tti(radio_slot, base));
+  }
+
+  // Almost 3 s at base+1, one window back at base, then almost 3 s at base+1 again: the window at base restarts the
+  // count, so neither run reaches the confirmation.
+  feed_windows(aligner, radio_slot, base + 1, CONFIRM - 1);
+  feed_windows(aligner, radio_slot, base, 1);
+  feed_windows(aligner, radio_slot, base + 1, CONFIRM - 1);
+  ASSERT_EQ(reported.size(), 1);
+  ASSERT_EQ(reported.front(), base);
+}
+
+TEST(ru_emulator_gps_slot_aligner_test, offset_on_a_slot_boundary_does_not_flip_flop)
+{
+  timing_notifier_spy          next;
+  std::vector<unsigned>        reported;
+  ru_emulator_gps_slot_aligner aligner(
+      next, ocudulog::fetch_basic_logger("TEST"), [&reported](unsigned offset) { reported.push_back(offset); });
+
+  const unsigned base       = 628;
+  uint64_t       radio_slot = 0;
+  for (unsigned i = 0; i != 2000 + 64; ++i, ++radio_slot) {
+    aligner.on_tti_boundary(make_tti(radio_slot, base));
   }
   ASSERT_EQ(reported.size(), 1);
 
-  // The second consecutive window adopts the new offset.
-  for (unsigned i = 0; i != 64; ++i, ++radio_slot) {
-    aligner.on_tti_boundary(make_tti(radio_slot, base + 1));
+  // The drift has brought the timing to half a slot (250 us) past the base offset: with +/-50 us of host jitter every
+  // measurement rounds to base or base+1 about equally, so the window medians alternate between the two (the bench
+  // case: offset 627/628 flipping three times in 0.2 s). Two minutes of it must not re-align once.
+  uint32_t lcg = 12345;
+  unsigned nof_windows_at_next = 0;
+  for (unsigned w = 0; w != 3750; ++w) {
+    unsigned at_next = 0;
+    for (unsigned i = 0; i != 64; ++i, ++radio_slot) {
+      lcg                     = lcg * 1664525U + 1013904223U;
+      const int64_t jitter_ns = 250000 + int64_t(lcg >> 8) % 100001 - 50000;
+      at_next += jitter_ns >= 250000;
+      aligner.on_tti_boundary(make_tti(radio_slot, base, jitter_ns));
+    }
+    nof_windows_at_next += at_next > 32;
   }
+  // The input really alternated (both medians occurred often), and the offset never moved.
+  ASSERT_GT(nof_windows_at_next, 1000U);
+  ASSERT_LT(nof_windows_at_next, 2750U);
+  ASSERT_EQ(reported.size(), 1);
+  ASSERT_EQ(reported.front(), base);
+
+  // Once the drift has carried the timing clearly past the boundary, the new offset is adopted exactly once.
+  feed_windows(aligner, radio_slot, base + 1, CONFIRM);
   ASSERT_EQ(reported.size(), 2);
   ASSERT_EQ(reported.back(), base + 1);
 }
@@ -133,8 +206,7 @@ TEST(ru_emulator_gps_slot_aligner_test, single_window_excursion_does_not_re_alig
   }
   ASSERT_EQ(reported.size(), 1);
 
-  // A single window straddles the next slot boundary (one-off excursion), then it returns: no re-alignment, the
-  // two-window hysteresis rejects it.
+  // A single window straddles the next slot boundary (one-off excursion), then it returns: no re-alignment.
   for (unsigned i = 0; i != 64; ++i, ++radio_slot) {
     aligner.on_tti_boundary(make_tti(radio_slot, base + 1));
   }
