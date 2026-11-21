@@ -5,6 +5,13 @@
 
 #include "ru_emulator_timing_notifier.h"
 #include "ocudu/ran/cyclic_prefix.h"
+#include "fmt/format.h"
+#include <algorithm>
+#include <cerrno>
+#include <cmath>
+#include <cstdlib>
+#include <cstring>
+#include <ctime>
 #include <future>
 #include <thread>
 
@@ -44,6 +51,18 @@ struct gps_clock {
 };
 
 } // namespace
+
+static int64_t clock_ns(clockid_t id)
+{
+  ::timespec ts;
+  ::clock_gettime(id, &ts);
+  return static_cast<int64_t>(ts.tv_sec) * 1000000000LL + ts.tv_nsec;
+}
+
+/// Samples above this are logged individually (rate limited) and counted as outliers.
+static constexpr int64_t TIMING_OUTLIER_NS     = 20000;
+static constexpr int64_t TIMING_REPORT_NS      = 60LL * 1000000000LL;
+static constexpr unsigned TIMING_MAX_OUTLIER_LOGS = 50;
 
 /// Calculates the fractional part inside a second from the given time point.
 static std::chrono::nanoseconds calculate_ns_fraction_from(gps_clock::time_point tp)
@@ -86,7 +105,11 @@ ru_emulator_timing_notifier::ru_emulator_timing_notifier(ocudulog::basic_logger&
   nof_symbols_per_sec(nof_symbols_per_slot * get_nof_slots_per_subframe(scs) * NOF_SUBFRAMES_PER_FRAME * 100),
   nof_slots_per_hyper_system_frame(slot_point(scs, 0).nof_slots_per_hyper_system_frame()),
   symbol_duration(1e9 / nof_symbols_per_sec),
-  sleep_time(std::chrono::duration_cast<std::chrono::nanoseconds>(symbol_duration) / 15)
+  sleep_time(std::chrono::duration_cast<std::chrono::nanoseconds>(symbol_duration) / 15),
+  abs_sleep([] {
+    const char* v = std::getenv("OPENRU_TIMING_ABS_SLEEP");
+    return (v != nullptr) && (std::strcmp(v, "1") == 0);
+  }())
 {
   // The GPS time epoch starts on 1980.1.6 so make sure that the system time is set after this date.
   // For simplicity reasons, only allow dates after 1981.
@@ -103,7 +126,8 @@ ru_emulator_timing_notifier::ru_emulator_timing_notifier(ocudulog::basic_logger&
 
 void ru_emulator_timing_notifier::start()
 {
-  logger.info("Starting the realtime timing notifier");
+  logger.info("Starting the realtime timing notifier (sleep mode: {})",
+              abs_sleep ? "absolute, once per symbol" : "polling, symbol/15");
 
   std::promise<void> p;
   std::future<void>  fut = p.get_future();
@@ -145,9 +169,11 @@ void ru_emulator_timing_notifier::stop()
 
 void ru_emulator_timing_notifier::timing_loop()
 {
+  next_report_ns = clock_ns(CLOCK_MONOTONIC) + TIMING_REPORT_NS;
   while (OCUDU_LIKELY(status.load(std::memory_order_relaxed) == worker_status::running)) {
     poll();
   }
+  report_if_due(clock_ns(CLOCK_MONOTONIC), true);
 
   // Acquire/Release semantics - ota_notifiers is cleared and destructed by a different thread.
   status.store(worker_status::stopped, std::memory_order_release);
@@ -157,7 +183,8 @@ void ru_emulator_timing_notifier::poll()
 {
   const std::chrono::duration<double, std::nano> slot_duration(1e6 / pow2(to_numerology_value(scs)));
 
-  auto now         = gps_clock::now();
+  const int64_t t_wake = clock_ns(CLOCK_MONOTONIC);
+  auto          now    = gps_clock::now();
   auto ns_fraction = calculate_ns_fraction_from(now);
 
   unsigned current_symbol_index = get_symbol_index(ns_fraction, symbol_duration);
@@ -166,7 +193,14 @@ void ru_emulator_timing_notifier::poll()
 
   // Are we still in the same symbol as before?
   if (delta == 0) {
+    if (abs_sleep) {
+      // Woke a hair before the boundary: sleep to it again.
+      sleep_until_next_symbol();
+      return;
+    }
+    const int64_t t0 = clock_ns(CLOCK_MONOTONIC);
     std::this_thread::sleep_for(sleep_time);
+    record(overshoot_hist, clock_ns(CLOCK_MONOTONIC) - t0 - sleep_time.count(), "sleep overshoot");
     return;
   }
 
@@ -187,6 +221,88 @@ void ru_emulator_timing_notifier::poll()
   slot_symbol_point symbol_point(current_slot, current_symbol_index % nof_symbols_per_slot, nof_symbols_per_slot);
 
   notify_slot_symbol_point(symbol_point);
+
+  const int64_t t_done = clock_ns(CLOCK_MONOTONIC);
+  record(work_hist, t_done - t_wake, "symbol work");
+  report_if_due(t_done, false);
+  if (abs_sleep) {
+    sleep_until_next_symbol();
+  }
+}
+
+void ru_emulator_timing_notifier::sleep_until_next_symbol()
+{
+  const int64_t rt_ns   = clock_ns(CLOCK_REALTIME);
+  const int64_t gps_ns  = rt_ns - std::chrono::duration_cast<std::chrono::nanoseconds>(gps_offset).count();
+  const int64_t frac_ns = gps_ns % 1000000000LL;
+  const double  sym_ns  = symbol_duration.count();
+  // Next boundary inside (or at the end of) the current second, rounded up to whole nanoseconds.
+  const auto    next_ns = static_cast<int64_t>(std::ceil((std::floor(frac_ns / sym_ns) + 1.0) * sym_ns));
+  const int64_t target  = rt_ns - frac_ns + next_ns;
+
+  ::timespec ts;
+  ts.tv_sec  = target / 1000000000LL;
+  ts.tv_nsec = target % 1000000000LL;
+  while (::clock_nanosleep(CLOCK_REALTIME, TIMER_ABSTIME, &ts, nullptr) == EINTR) {
+  }
+  record(overshoot_hist, clock_ns(CLOCK_REALTIME) - target, "sleep overshoot");
+}
+
+void ru_emulator_timing_notifier::histogram::add(int64_t ns)
+{
+  const int64_t us = (ns < 0) ? 0 : ns / 1000;
+  ++buckets[(us < static_cast<int64_t>(nof_hist_buckets) - 1) ? us : nof_hist_buckets - 1];
+  ++count;
+  max_ns = std::max(max_ns, ns);
+  if (ns > TIMING_OUTLIER_NS) {
+    ++nof_outliers;
+  }
+}
+
+unsigned ru_emulator_timing_notifier::histogram::percentile_us(double fraction) const
+{
+  const auto target = static_cast<uint64_t>(std::ceil(fraction * static_cast<double>(count)));
+  uint64_t   acc    = 0;
+  for (unsigned i = 0; i != nof_hist_buckets; ++i) {
+    acc += buckets[i];
+    if (acc >= target) {
+      return i + 1;
+    }
+  }
+  return nof_hist_buckets;
+}
+
+void ru_emulator_timing_notifier::record(histogram& hist, int64_t ns, const char* what)
+{
+  hist.add(ns);
+  if ((ns > TIMING_OUTLIER_NS) && (nof_outliers_logged < TIMING_MAX_OUTLIER_LOGS)) {
+    ++nof_outliers_logged;
+    logger.info("Timing worker {} outlier: {} us", what, ns / 1000);
+  }
+}
+
+void ru_emulator_timing_notifier::report_if_due(int64_t now_mono_ns, bool force)
+{
+  if (!force && (now_mono_ns < next_report_ns)) {
+    return;
+  }
+  next_report_ns = now_mono_ns + TIMING_REPORT_NS;
+  auto line      = [](const histogram& h) {
+    return fmt::format("n={} p50<{}us p99<{}us p99.9<{}us max={}us >20us={}",
+                       h.count,
+                       h.percentile_us(0.5),
+                       h.percentile_us(0.99),
+                       h.percentile_us(0.999),
+                       h.max_ns / 1000,
+                       h.nof_outliers);
+  };
+  logger.info("Timing worker stats ({}): symbol work {}; sleep overshoot {}",
+              abs_sleep ? "abs-sleep" : "poll-sleep",
+              line(work_hist),
+              line(overshoot_hist));
+  work_hist           = {};
+  overshoot_hist      = {};
+  nof_outliers_logged = 0;
 }
 
 void ru_emulator_timing_notifier::notify_slot_symbol_point(slot_symbol_point slot)

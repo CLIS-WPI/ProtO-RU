@@ -8,7 +8,9 @@
 #include "ocudu/ocudulog/logger.h"
 #include "ocudu/ofh/timing/ofh_ota_symbol_boundary_notifier_manager.h"
 #include "ocudu/support/executors/task_executor.h"
+#include <array>
 #include <atomic>
+#include <cstdint>
 
 namespace ocudu {
 
@@ -28,6 +30,33 @@ class ru_emulator_timing_notifier : public ofh::ota_symbol_boundary_notifier_man
   const std::chrono::nanoseconds                  sleep_time;
   unsigned                                        previous_symb_index = 0;
   std::atomic<worker_status>                      status{worker_status::running};
+
+  /// OPENRU_TIMING_ABS_SLEEP=1: one absolute CLOCK_REALTIME sleep to the next symbol boundary instead of
+  /// sleep_time (symbol/15) polls. Default off (upstream behaviour).
+  const bool abs_sleep;
+
+  /// In-thread timing measurement (both modes): 1 us buckets, last bucket = overflow.
+  static constexpr unsigned nof_hist_buckets = 256;
+  struct histogram {
+    std::array<uint64_t, nof_hist_buckets> buckets = {};
+    uint64_t                               count   = 0;
+    int64_t                                max_ns  = 0;
+    uint64_t                               nof_outliers = 0;
+    void                                   add(int64_t ns);
+    /// Value in us below which the given fraction of samples lies (bucket upper edge).
+    unsigned                               percentile_us(double fraction) const;
+  };
+  histogram work_hist;
+  histogram overshoot_hist;
+  int64_t   next_report_ns       = 0;
+  unsigned  nof_outliers_logged  = 0;
+
+  /// Records a sample; logs it once per report period (max 50) when above the outlier threshold.
+  void record(histogram& hist, int64_t ns, const char* what);
+  /// Logs and resets the period histograms every 60 s (called from the timing thread).
+  void report_if_due(int64_t now_mono_ns, bool force);
+  /// Sleeps until the next symbol boundary (absolute CLOCK_REALTIME) and records the overshoot.
+  void sleep_until_next_symbol();
 
 public:
   ru_emulator_timing_notifier(ocudulog::basic_logger& logger_, task_executor& executor_, subcarrier_spacing scs_);
