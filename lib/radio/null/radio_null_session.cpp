@@ -123,12 +123,31 @@ public:
       }
     }
 
+    unsigned du_sfn = 0, du_slot = 0, radio_sfn = 0, radio_slot = 0;
+    parent.slot_of_du(ts, du_sfn, du_slot);
+    parent.slot_of_radio(ts, radio_sfn, radio_slot);
+    const unsigned spf       = 10u * (parent.scs_khz / 15u);
+    const unsigned du_abs    = (du_sfn * spf + du_slot) % 5120U;
+    const unsigned radio_abs = (radio_sfn * spf + radio_slot) % 5120U;
+    const bool     new_slot  = du_abs != parent.rx_last_du_abs;
+    if (new_slot) {
+      parent.rx_last_du_abs = du_abs;
+    }
+    bool marker_exists = parent.rx_start_marker.empty() || std::filesystem::exists(parent.rx_start_marker);
+    bool read_feed     = parent.rx_start_du_slot < 0 ||
+                     (parent.rx_gate.update(du_abs, radio_abs, marker_exists, new_slot) == null_rx_gate::action::play);
+    if (parent.rx_gate.missed() && !parent.rx_missed_logged) {
+      parent.rx_missed_logged = true;
+      parent.logger.warning("null radio: RX feed target slot {} already passed; holding zeros",
+                            parent.rx_start_du_slot);
+    }
+
     const unsigned     nc = std::min(data.get_nof_channels(), nof_rx);
     std::vector<float> interleaved(static_cast<size_t>(ns) * 2);
     for (unsigned ch = 0; ch < nc; ++ch) {
       span<ci16_t> out    = data.get_channel_buffer(ch);
       bool         filled = false;
-      if (rx_files[ch].is_open() && !rx_eof[ch]) {
+      if (read_feed && rx_files[ch].is_open() && !rx_eof[ch]) {
         rx_files[ch].read(reinterpret_cast<char*>(interleaved.data()),
                           static_cast<std::streamsize>(interleaved.size() * sizeof(float)));
         const auto got = static_cast<size_t>(rx_files[ch].gcount() / sizeof(float));
@@ -144,6 +163,10 @@ public:
       if (!filled) {
         std::fill(out.begin(), out.end(), ci16_t{0, 0});
       }
+    }
+
+    if (read_feed) {
+      parent.rx_samples_read.fetch_add(ns, std::memory_order_relaxed);
     }
 
     metadata md;
@@ -171,6 +194,9 @@ private:
 bool radio_session_null_impl::parse_args(const std::string& args,
                                          std::string&       tx_dump,
                                          std::string&       rx_feed,
+                                         std::string&       rx_start_marker,
+                                         int&               rx_start_du_slot,
+                                         unsigned&          rx_start_stable_slots,
                                          pace_mode&         pace,
                                          unsigned&          scs_khz,
                                          uint64_t&          max_dump_bytes,
@@ -187,6 +213,15 @@ bool radio_session_null_impl::parse_args(const std::string& args,
   rx_feed = extract_kv(args, "rx_feed");
   if (rx_feed.empty()) {
     rx_feed = extract_kv(args, "rx_feed_dir");
+  }
+  rx_start_marker = extract_kv(args, "rx_start_marker");
+  const std::string rsd = extract_kv(args, "rx_start_du_slot");
+  if (!rsd.empty()) {
+    rx_start_du_slot = static_cast<int>(std::stol(rsd));
+  }
+  const std::string rss = extract_kv(args, "rx_start_stable_slots");
+  if (!rss.empty()) {
+    rx_start_stable_slots = static_cast<unsigned>(std::stoul(rss));
   }
   const std::string pace_s = extract_kv(args, "pace");
   if (pace_s == "free") {
@@ -522,6 +557,9 @@ radio_session_null_impl::radio_session_null_impl(const radio_configuration::radi
   if (!parse_args(config.args,
                   tx_dump_dir,
                   rx_feed_dir,
+                  rx_start_marker,
+                  rx_start_du_slot,
+                  rx_start_stable_slots,
                   pace,
                   scs_khz,
                   max_dump_bytes,
@@ -542,6 +580,11 @@ radio_session_null_impl::radio_session_null_impl(const radio_configuration::radi
   samples_per_slot = sampling_rate_Hz > 0.0
                          ? static_cast<unsigned>(std::llround(sampling_rate_Hz / (1000.0 * (scs_khz / 15.0))))
                          : 0;
+
+  if (rx_start_marker.empty()) {
+    rx_start_marker = dump_start_marker;
+  }
+  rx_gate = null_rx_gate({rx_start_du_slot, rx_start_stable_slots, 5120U});
 
   gateways.push_back(std::make_unique<null_gateway>(*this, nof_tx_ports, nof_rx_ports));
   gateways.front()->open_rx(rx_feed_dir);
@@ -659,6 +702,17 @@ void radio_session_null_impl::write_sidecar_json() const
       << "    \"first_dump_abs_sample_offset\": " << first_dump_abs_sample_offset << ",\n"
       << "    \"last_du_sfn\": " << last_du_sfn << ",\n"
       << "    \"last_du_slot\": " << last_du_slot << "\n"
+      << "  },\n"
+      << "  \"rx\": {\n"
+      << "    \"feed\": \"" << rx_feed_dir << "\",\n"
+      << "    \"start_du_slot\": " << rx_start_du_slot << ",\n"
+      << "    \"stable_slots\": " << rx_start_stable_slots << ",\n"
+      << "    \"armed\": " << (rx_gate.armed() ? "true" : "false") << ",\n"
+      << "    \"started\": " << (rx_gate.started() ? "true" : "false") << ",\n"
+      << "    \"missed\": " << (rx_gate.missed() ? "true" : "false") << ",\n"
+      << "    \"stable_delta\": " << rx_gate.stable_delta() << ",\n"
+      << "    \"started_slot\": " << rx_gate.started_slot() << ",\n"
+      << "    \"samples_read\": " << rx_samples_read.load() << "\n"
       << "  },\n"
       << "  \"tx_index\": \"tx_index.jsonl\",\n"
       << "  \"align\": \"du_slot\"\n"
