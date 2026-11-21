@@ -4,6 +4,7 @@
 
 #pragma once
 
+#include "null_rx_gate.h"
 #include "ocudu/radio/radio_session.h"
 #include "ocudu/support/executors/task_executor.h"
 #include <atomic>
@@ -58,6 +59,13 @@ private:
   bool                    successful = false;
   std::string             tx_dump_dir;
   std::string             rx_feed_dir;
+  std::string             rx_start_marker;
+  int                     rx_start_du_slot = -1;
+  unsigned                rx_start_stable_slots = 100;
+  null_rx_gate            rx_gate;
+  unsigned                rx_last_du_abs = ~0U;
+  std::atomic<uint64_t>   rx_samples_read{0};
+  bool                    rx_missed_logged = false;
   pace_mode               pace = pace_mode::realtime;
   double                  sampling_rate_Hz = 0.0;
   unsigned                nof_tx_ports     = 0;
@@ -131,6 +139,9 @@ private:
   static bool parse_args(const std::string& args,
                          std::string&       tx_dump,
                          std::string&       rx_feed,
+                         std::string&       rx_start_marker,
+                         int&               rx_start_du_slot,
+                         unsigned&          rx_start_stable_slots,
                          pace_mode&         pace,
                          unsigned&          scs_khz,
                          uint64_t&          max_dump_bytes,
