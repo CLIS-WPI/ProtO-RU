@@ -27,9 +27,12 @@ namespace ocudu {
 /// callback. Measurement then continues for the lifetime of the run: with a disciplined radio clock (gpsdo, or a
 /// shared external reference) the radio and host timelines do not drift, so the median never changes and the offset is
 /// reported exactly once. With the radio on its free-running internal clock, the radio sample clock drifts against the
-/// host/GPS timeline the offset is keyed to; the tracker re-applies the offset whenever the windowed median moves by a
-/// slot (gated by a two-window hysteresis to reject host-clock jitter), keeping the wire-slot labelling correct as the
-/// drift accumulates. Each re-alignment is a one-slot step, so it is a far smaller disturbance than the unbounded
+/// host/GPS timeline the offset is keyed to; the tracker re-applies the offset once the windowed median has agreed on a
+/// new value for \ref REALIGN_CONFIRM_MS of consecutive windows, keeping the wire-slot labelling correct as the drift
+/// accumulates. The confirmation spans seconds, not two windows: while the drift crosses a slot boundary, host-clock
+/// jitter makes consecutive window medians alternate between the two neighbouring offsets for minutes, and a two-window
+/// gate re-labelled the slots back and forth (observed on the bench: 3 flips in 0.2 s, and 55 in two minutes), each
+/// flip dropping the attached UEs. A window back at the applied offset restarts the confirmation. Each re-alignment is a one-slot step, so it is a far smaller disturbance than the unbounded
 /// labelling error a frozen offset would accrue - though a disciplined clock remains the only way to remove the drift
 /// (and the carrier CFO it implies) entirely.
 class ru_emulator_gps_slot_aligner : public ru_timing_notifier
@@ -67,6 +70,19 @@ private:
   /// Number of TTI measurements each windowed median is taken over.
   static constexpr unsigned NOF_MEASUREMENTS = 64;
 
+public:
+  /// Time, in milliseconds, consecutive windows must agree on a new offset before it is adopted.
+  static constexpr unsigned REALIGN_CONFIRM_MS = 3000;
+
+  /// Number of consecutive windows that make up \ref REALIGN_CONFIRM_MS at the given subcarrier spacing.
+  static constexpr unsigned nof_confirm_windows(subcarrier_spacing scs)
+  {
+    const unsigned slots = REALIGN_CONFIRM_MS * get_nof_slots_per_subframe(scs);
+    return (slots + NOF_MEASUREMENTS - 1) / NOF_MEASUREMENTS;
+  }
+
+private:
+
   void measure(const tti_boundary_context& context)
   {
     const subcarrier_spacing scs = context.slot.scs();
@@ -93,41 +109,50 @@ private:
 
     // Establish the offset on the first full window.
     if (!applied) {
-      apply(median, /*initial=*/true);
+      apply(median);
+      logger.info("Aligned the radio slot numbering to the GPS wire numbering: slot offset '{}'. Tracking the radio "
+                  "clock drift against the host clock; keep the host clock GPS/NTP-synchronized.",
+                  median);
       return;
     }
 
-    // Already aligned and the median has not moved: nothing to do.
+    // Already aligned and the median has not moved: a pending candidate, if any, was jitter.
     if (median == applied_offset) {
-      pending_valid = false;
+      nof_pending_windows = 0;
       return;
     }
 
-    // The median moved. Adopt it only once a second consecutive window agrees, so a one-off jitter excursion across a
-    // slot boundary does not trigger a spurious re-alignment.
-    if (pending_valid && median == pending_offset) {
-      apply(median, /*initial=*/false);
-      pending_valid = false;
+    // The median moved. Count consecutive windows agreeing on the same new value; adopt it only after
+    // REALIGN_CONFIRM_MS of them, so the alternating medians of a boundary crossing never re-label the slots.
+    if (nof_pending_windows != 0 && median == pending_offset) {
+      ++nof_pending_windows;
+    } else {
+      pending_offset      = median;
+      nof_pending_windows = 1;
+    }
+    if (nof_pending_windows < nof_confirm_windows(scs)) {
       return;
     }
-    pending_offset = median;
-    pending_valid  = true;
+
+    const unsigned previous = applied_offset;
+    apply(median);
+    ++nof_realignments;
+    logger.info("Re-aligned the radio slot numbering to the GPS wire numbering: slot offset '{}' -> '{}' after {} "
+                "consecutive windows ({} ms) agreed; re-alignment #{} (radio clock drift). Use a gpsdo or shared "
+                "external reference to remove the drift.",
+                previous,
+                median,
+                nof_pending_windows,
+                nof_pending_windows * NOF_MEASUREMENTS / get_nof_slots_per_subframe(scs),
+                nof_realignments);
+    nof_pending_windows = 0;
   }
 
-  void apply(unsigned offset, bool initial)
+  void apply(unsigned offset)
   {
     applied        = true;
     applied_offset = offset;
     on_offset_measured(offset);
-    if (initial) {
-      logger.info("Aligned the radio slot numbering to the GPS wire numbering: slot offset '{}'. Tracking the radio "
-                  "clock drift against the host clock; keep the host clock GPS/NTP-synchronized.",
-                  offset);
-    } else {
-      logger.info("Re-aligned the radio slot numbering to the GPS wire numbering: slot offset now '{}' (radio clock "
-                  "drift). Use a gpsdo or shared external reference to remove the drift.",
-                  offset);
-    }
   }
 
   ru_timing_notifier&                    next;
@@ -139,9 +164,11 @@ private:
   /// Currently applied offset and whether one has been applied yet.
   bool     applied        = false;
   unsigned applied_offset = 0;
-  /// Candidate offset awaiting a second confirming window (drift-tracking hysteresis).
-  bool     pending_valid  = false;
-  unsigned pending_offset = 0;
+  /// Candidate offset and the number of consecutive windows that agreed on it (drift-tracking hysteresis).
+  unsigned pending_offset      = 0;
+  unsigned nof_pending_windows = 0;
+  /// Number of re-alignments since the start, for the log.
+  unsigned nof_realignments = 0;
 };
 
 } // namespace ocudu
